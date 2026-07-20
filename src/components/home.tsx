@@ -29,52 +29,34 @@ import AgentConfigPanel from "./agents/AgentConfigPanel";
 import SubscriptionModal from "@/components/subscription/SubscriptionModal";
 import { authService } from "@/services/authService";
 import { databaseService } from "@/services/databaseService";
+import type { Agent } from "@/services/newsDataService";
+import { useAuth } from "@/contexts/AuthContext";
 
 const Home = () => {
   const [isAgentConfigOpen, setIsAgentConfigOpen] = useState(false);
   const [isSubscriptionModalOpen, setIsSubscriptionModalOpen] = useState(false);
   const [activeTab, setActiveTab] = useState("all");
-  const [currentUser, setCurrentUser] = useState(authService.getCurrentUser());
+  const { user: currentUser, signOut } = useAuth();
   const [showUpgradePrompt, setShowUpgradePrompt] = useState(false);
-  
-  // Mock user data
-  const user = {
-    name: "Sarah Johnson",
-    role: "Chief Executive Officer",
-    avatar: "https://api.dicebear.com/7.x/avataaars/svg?seed=Sarah",
+
+  const displayName = currentUser?.name ?? "Guest";
+  const displayRole = currentUser?.role === "admin" ? "Administrator" : "Member";
+  const avatarUrl = `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(displayName)}`;
+
+  const [agents, setAgents] = useState<Agent[]>([]);
+
+  const reloadAgents = () => {
+    if (!currentUser) return;
+    databaseService
+      .listAgents(currentUser.id)
+      .then(setAgents)
+      .catch(err => console.error("Failed to load agents:", err));
   };
 
-  // Mock agent data with enhanced status
-  const [agents, setAgents] = useState([
-    {
-      id: 1,
-      name: "Tech Industry",
-      status: "active",
-      lastUpdate: "10 min ago",
-      articlesCollected: 24,
-    },
-    {
-      id: 2,
-      name: "Competitor Analysis",
-      status: "active",
-      lastUpdate: "1 hour ago",
-      articlesCollected: 18,
-    },
-    { 
-      id: 3, 
-      name: "Market Trends", 
-      status: "idle", 
-      lastUpdate: "3 hours ago",
-      articlesCollected: 12,
-    },
-    {
-      id: 4,
-      name: "Regulatory Changes",
-      status: "active",
-      lastUpdate: "30 min ago",
-      articlesCollected: 15,
-    },
-  ]);
+  useEffect(() => {
+    reloadAgents();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUser]);
 
   useEffect(() => {
     // Check if user should see upgrade prompts
@@ -139,12 +121,7 @@ const Home = () => {
   };
 
   const handleRefreshAll = () => {
-    // Simulate refreshing all agents
-    setAgents(agents.map(agent => ({
-      ...agent,
-      lastUpdate: "Just now",
-      articlesCollected: agent.articlesCollected + Math.floor(Math.random() * 5),
-    })));
+    reloadAgents();
   };
 
   const handleAgentConfigClose = () => {
@@ -409,12 +386,12 @@ const Home = () => {
           <div className="mt-auto pt-4">
             <div className="flex items-center p-2 rounded-md hover:bg-accent cursor-pointer">
               <Avatar className="h-8 w-8 mr-2">
-                <AvatarImage src={user.avatar} alt={user.name} />
-                <AvatarFallback>{user.name.charAt(0)}</AvatarFallback>
+                <AvatarImage src={avatarUrl} alt={displayName} />
+                <AvatarFallback>{displayName.charAt(0)}</AvatarFallback>
               </Avatar>
               <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium truncate">{user.name}</p>
-                <p className="text-xs text-muted-foreground truncate">{user.role}</p>
+                <p className="text-sm font-medium truncate">{displayName}</p>
+                <p className="text-xs text-muted-foreground truncate">{displayRole}</p>
               </div>
             </div>
           </div>
@@ -519,7 +496,9 @@ const Home = () => {
                       )}
                     </DropdownMenuItem>
                     <DropdownMenuItem>Help & Support</DropdownMenuItem>
-                    <DropdownMenuItem>Sign Out</DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => signOut()}>
+                      Sign Out
+                    </DropdownMenuItem>
                   </DropdownMenuContent>
                 </DropdownMenu>
               </div>

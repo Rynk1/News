@@ -30,6 +30,8 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { agentService, AgentCapabilities, AgentTask } from "@/services/agentService";
+import { databaseService } from "@/services/databaseService";
+import { useAuth } from "@/contexts/AuthContext";
 
 interface Agent {
   id: string;
@@ -62,45 +64,10 @@ const AgentConfigPanel = ({
   onOpenChange,
   onClose,
 }: AgentConfigPanelProps) => {
+  const { user } = useAuth();
   const [activeTab, setActiveTab] = useState("create");
-  const [agents, setAgents] = useState<Agent[]>([
-    {
-      id: "1",
-      name: "Tech Industry Tracker",
-      description: "Monitors technology industry news and trends with AI-powered analysis",
-      sources: ["TechCrunch", "Wired", "The Verge"],
-      topics: ["AI", "Cloud Computing", "Cybersecurity"],
-      entities: ["Google", "Microsoft", "Apple"],
-      frequency: "daily",
-      status: "active",
-      lastUpdate: "10 min ago",
-      articlesCollected: 24,
-    },
-    {
-      id: "2",
-      name: "Competitor Analysis",
-      description: "Tracks news about direct competitors with sentiment analysis",
-      sources: ["Bloomberg", "Reuters", "Financial Times"],
-      topics: ["Market Share", "Product Launch", "Acquisitions"],
-      entities: ["Amazon", "Facebook", "Netflix"],
-      frequency: "hourly",
-      status: "active",
-      lastUpdate: "1 hour ago",
-      articlesCollected: 18,
-    },
-    {
-      id: "3",
-      name: "Market Trends",
-      description: "Monitors overall market conditions with predictive analytics",
-      sources: ["Wall Street Journal", "CNBC", "MarketWatch"],
-      topics: ["Stock Market", "Economic Indicators", "Industry Reports"],
-      entities: ["S&P 500", "NASDAQ", "Federal Reserve"],
-      frequency: "daily",
-      status: "idle",
-      lastUpdate: "3 hours ago",
-      articlesCollected: 12,
-    },
-  ]);
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [error, setError] = useState<string | null>(null);
 
   const [newAgent, setNewAgent] = useState<AgentDraft>({
     name: "",
@@ -154,15 +121,30 @@ const AgentConfigPanel = ({
   ];
 
   useEffect(() => {
-    // Load agent capabilities on mount
+    // Load the user's agents from the data layer (Supabase or mock fallback).
+    let cancelled = false;
+    if (!user) return;
+    databaseService
+      .listAgents(user.id)
+      .then(loaded => {
+        if (!cancelled) setAgents(loaded);
+      })
+      .catch(err => {
+        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
+
+  useEffect(() => {
+    // Load agent capabilities and running tasks whenever the agent list changes.
     agents.forEach(agent => {
       const capabilities = agentService.getAgentCapabilities(agent.id);
       if (capabilities) {
         setAgentCapabilities(prev => new Map(prev.set(agent.id, capabilities)));
       }
     });
-    
-    // Load running tasks
     setRunningTasks(agentService.getRunningTasks());
   }, [agents]);
 
@@ -175,21 +157,20 @@ const AgentConfigPanel = ({
   };
 
   const handleCreateAgent = async () => {
-    if (!newAgent.name.trim()) return;
+    if (!newAgent.name.trim() || !user) return;
+    setError(null);
 
-    const newId = Math.random().toString(36).substring(2, 9);
-    const agent: Agent = {
-      ...newAgent,
-      id: newId,
-      status: "idle",
-      lastUpdate: "Just created",
-      articlesCollected: 0,
-    };
-    
-    // Deploy the agent with functional capabilities
-    const deployed = await agentService.deployAgent(agent);
-    
-    if (deployed) {
+    try {
+      const agent = await databaseService.createUserAgent(user.id, {
+        ...newAgent,
+        status: "idle",
+        lastUpdate: "Just created",
+        articlesCollected: 0,
+      });
+
+      // Deploy the agent with functional capabilities
+      await agentService.deployAgent(agent);
+
       setAgents([...agents, agent]);
       setNewAgent({
         name: "",
@@ -200,19 +181,27 @@ const AgentConfigPanel = ({
         frequency: "daily",
       });
       setActiveTab("manage");
-      
-      // Load capabilities for the new agent
-      const capabilities = agentService.getAgentCapabilities(newId);
+
+      const capabilities = agentService.getAgentCapabilities(agent.id);
       if (capabilities) {
-        setAgentCapabilities(prev => new Map(prev.set(newId, capabilities)));
+        setAgentCapabilities(prev => new Map(prev.set(agent.id, capabilities)));
       }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
     }
   };
 
-  const handleDeleteAgent = (id: string) => {
-    setAgents(agents.filter((agent) => agent.id !== id));
-    if (selectedAgent && selectedAgent.id === id) {
-      setSelectedAgent(null);
+  const handleDeleteAgent = async (id: string) => {
+    if (!user) return;
+    setError(null);
+    try {
+      await databaseService.deleteUserAgent(user.id, id);
+      setAgents(agents.filter((agent) => agent.id !== id));
+      if (selectedAgent && selectedAgent.id === id) {
+        setSelectedAgent(null);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
     }
   };
 
@@ -220,15 +209,22 @@ const AgentConfigPanel = ({
     setSelectedAgent({ ...agent });
   };
 
-  const handleUpdateAgent = () => {
-    if (!selectedAgent) return;
-
-    setAgents(
-      agents.map((agent) =>
-        agent.id === selectedAgent.id ? selectedAgent : agent,
-      ),
-    );
-    setSelectedAgent(null);
+  const handleUpdateAgent = async () => {
+    if (!selectedAgent || !user) return;
+    setError(null);
+    try {
+      const updated = await databaseService.updateUserAgent(
+        user.id,
+        selectedAgent.id,
+        selectedAgent,
+      );
+      setAgents(
+        agents.map((agent) => (agent.id === updated.id ? updated : agent)),
+      );
+      setSelectedAgent(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
   };
 
   const handleTestAgent = async (agent: Agent) => {
@@ -604,6 +600,12 @@ const AgentConfigPanel = ({
             AI News Agent Configuration & Management
           </DialogTitle>
         </DialogHeader>
+
+        {error && (
+          <div className="rounded-md border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">
+            {error}
+          </div>
+        )}
 
         <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
           <TabsList className="grid w-full grid-cols-3">
