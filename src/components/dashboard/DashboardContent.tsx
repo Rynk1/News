@@ -27,6 +27,7 @@ import {
   Grid3X3,
 } from "lucide-react";
 import ArticleDigest from "./ArticleDigest";
+import type { Article } from "@/services/newsDataService";
 
 interface DashboardContentProps {
   category?: string;
@@ -53,7 +54,7 @@ const DashboardContent = ({
   ];
 
   // Enhanced mock articles with categories
-  const mockArticles = [
+  const mockArticles: Article[] = [
     {
       id: 1,
       title: "AI Regulation Framework Proposed by EU Commission",

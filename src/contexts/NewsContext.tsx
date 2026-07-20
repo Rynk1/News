@@ -128,12 +128,13 @@ function newsReducer(state: NewsState, action: NewsAction): NewsState {
       return { ...state, sentimentData: action.payload };
     case "SET_LAST_REFRESH":
       return { ...state, lastRefresh: action.payload };
-    case "TOGGLE_ARTICLE_SAVE":
+    case "TOGGLE_ARTICLE_SAVE": {
       const articleId = action.payload;
       const savedArticles = state.savedArticles.includes(articleId)
         ? state.savedArticles.filter(id => id !== articleId)
         : [...state.savedArticles, articleId];
       return { ...state, savedArticles };
+    }
     case "ADD_ANNOTATION":
       return {
         ...state,

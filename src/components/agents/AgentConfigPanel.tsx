@@ -44,6 +44,13 @@ interface Agent {
   articlesCollected: number;
 }
 
+type AgentDraft = Pick<
+  Agent,
+  "name" | "description" | "sources" | "topics" | "entities" | "frequency"
+>;
+
+type AgentListField = "sources" | "topics" | "entities";
+
 interface AgentConfigPanelProps {
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
@@ -95,7 +102,7 @@ const AgentConfigPanel = ({
     },
   ]);
 
-  const [newAgent, setNewAgent] = useState({
+  const [newAgent, setNewAgent] = useState<AgentDraft>({
     name: "",
     description: "",
     sources: [],
@@ -247,9 +254,15 @@ const AgentConfigPanel = ({
 
   const handleRunAgentTask = async (agent: Agent, taskType: 'scrape' | 'analyze' | 'synthesize' | 'monitor') => {
     try {
-      const task = await agentService.executeAgentTask(agent, taskType);
+      const result = await agentService.executeAgentTask(agent, taskType);
+      if (!result.success || !result.task) {
+        console.error("Failed to run agent task:", result.error);
+        return;
+      }
+
+      const task = result.task;
       setRunningTasks(prev => [...prev, task]);
-      
+
       // Update agent status
       setAgents(agents.map(a => 
         a.id === agent.id 
@@ -261,19 +274,19 @@ const AgentConfigPanel = ({
     }
   };
 
-  const handleAddItem = (field: string, value: string) => {
+  const handleAddItem = (field: AgentListField, value: string) => {
     if (!value.trim()) return;
 
-    const currentAgent = selectedAgent || newAgent;
-    const updatedAgent = {
-      ...currentAgent,
-      [field]: [...currentAgent[field], value.trim()],
-    };
-
     if (selectedAgent) {
-      setSelectedAgent(updatedAgent);
+      setSelectedAgent({
+        ...selectedAgent,
+        [field]: [...selectedAgent[field], value.trim()],
+      });
     } else {
-      setNewAgent(updatedAgent);
+      setNewAgent({
+        ...newAgent,
+        [field]: [...newAgent[field], value.trim()],
+      });
     }
 
     // Clear the input field
@@ -283,20 +296,15 @@ const AgentConfigPanel = ({
     }
   };
 
-  const handleRemoveItem = (field: string, index: number) => {
-    const currentAgent = selectedAgent || newAgent;
-    const updatedItems = [...currentAgent[field]];
-    updatedItems.splice(index, 1);
-    
-    const updatedAgent = {
-      ...currentAgent,
-      [field]: updatedItems,
-    };
-
+  const handleRemoveItem = (field: AgentListField, index: number) => {
     if (selectedAgent) {
-      setSelectedAgent(updatedAgent);
+      const updatedItems = [...selectedAgent[field]];
+      updatedItems.splice(index, 1);
+      setSelectedAgent({ ...selectedAgent, [field]: updatedItems });
     } else {
-      setNewAgent(updatedAgent);
+      const updatedItems = [...newAgent[field]];
+      updatedItems.splice(index, 1);
+      setNewAgent({ ...newAgent, [field]: updatedItems });
     }
   };
 
