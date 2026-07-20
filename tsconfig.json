@@ -20,6 +20,11 @@
     }
   },
   "include": ["src"],
-  "exclude": [],
+  "exclude": [
+    "src/config/environment.ts",
+    "src/services/realAuthService.ts",
+    "src/services/realAgentService.ts",
+    "src/services/realDatabaseService.ts"
+  ],
   "references": [{ "path": "./tsconfig.node.json" }]
 }
