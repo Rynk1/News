@@ -26,7 +26,8 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { authService, SubscriptionTier } from "@/services/authService";
+import { authService } from "@/services/authService";
+import { useAuth } from "@/contexts/AuthContext";
 
 interface SubscriptionModalProps {
   open?: boolean;
@@ -39,25 +40,20 @@ const SubscriptionModal = ({
   onOpenChange,
   trigger 
 }: SubscriptionModalProps) => {
+  const { user: currentUser, refresh } = useAuth();
   const [selectedTier, setSelectedTier] = useState<string>('starter');
   const [isUpgrading, setIsUpgrading] = useState(false);
-  const [currentUser, setCurrentUser] = useState(authService.getCurrentUser());
   const [subscriptionTiers] = useState(authService.getSubscriptionTiers());
 
   const trialDaysLeft = authService.getTrialDaysRemaining();
-  const isTrialExpired = authService.isTrialExpired();
   const shouldShowUrgency = trialDaysLeft <= 3 && trialDaysLeft > 0;
-
-  useEffect(() => {
-    setCurrentUser(authService.getCurrentUser());
-  }, []);
 
   const handleUpgrade = async () => {
     setIsUpgrading(true);
     try {
       const result = await authService.upgradeSubscription(selectedTier);
       if (result.success) {
-        setCurrentUser(authService.getCurrentUser());
+        refresh();
         onOpenChange?.(false);
       }
     } catch (error) {

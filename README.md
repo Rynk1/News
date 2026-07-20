@@ -5,13 +5,14 @@ sources and topics, then surface digests, sentiment, trending topics, and
 executive insights. Includes subscription tiers, a Kindle-style reader, and an
 admin dashboard.
 
-> **Status: UI prototype.** The app currently runs entirely on in-memory
-> **mock data** (see `src/services/*Service.ts`). There is no live backend,
-> database, or scheduler yet. A server-side "blueprint" exists under
-> `src/config/environment.ts` and `src/services/real*Service.ts` but is **not
-> wired into the app** and is excluded from the client build (it uses
-> Node-only libraries and must move to a real backend before use). See the
-> roadmap below.
+> **Status: real auth + backend (Supabase), with a demo fallback.**
+> When `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` are set, the app uses
+> Supabase for authentication and persists profiles, subscriptions, and agents
+> (row-level security keeps each user's data isolated). When those variables
+> are **not** set, the app falls back to the original in-memory **mock data**
+> ("demo mode") so it stays runnable without a backend. Article ingestion
+> (the autonomous scraping/AI pipeline) is still mock and is the next step —
+> see the roadmap below.
 
 ## Tech stack
 
@@ -48,6 +49,30 @@ Never put secret keys (OpenAI, Stripe secret, database credentials) behind a
 `VITE_` prefix; those belong on a backend server. The server-side blueprint in
 `src/config/environment.ts` reads the non-`VITE_` variables via `process.env`.
 
+## Backend setup (Supabase)
+
+The backend is [Supabase](https://supabase.com/) (hosted Postgres + Auth),
+called directly from the browser with the public anon key.
+
+1. Create a project at [supabase.com](https://supabase.com/) (or run it
+   locally with the Supabase CLI).
+2. Apply the schema: open the SQL editor and run
+   [`supabase/migrations/0001_init.sql`](supabase/migrations/0001_init.sql)
+   (or `supabase db push` with the CLI). It creates the `profiles`, `agents`,
+   `articles`, `saved_articles`, `annotations`, and `usage_events` tables,
+   enables row-level security, and adds a trigger that creates a profile row
+   for every new auth user.
+3. Copy your project URL and anon key into `.env`:
+   ```
+   VITE_SUPABASE_URL=https://YOUR-PROJECT.supabase.co
+   VITE_SUPABASE_ANON_KEY=your-anon-key
+   ```
+4. Restart `npm run dev`. You'll now get a login/registration screen and all
+   data persists to Supabase.
+
+With no Supabase env vars set, the app runs in demo mode (auto-signed-in mock
+user, in-memory data) — useful for local UI work and for CI.
+
 ## Project structure
 
 ```
@@ -71,14 +96,15 @@ request and on pushes to `main`/`master`.
 This app is a functional prototype. To make it production-ready and truly
 autonomous:
 
-1. **Stabilize** (this PR): build fails on type errors, ESLint configured, CI
+1. **Stabilize** (done): build fails on type errors, ESLint configured, CI
    added, dead backend code quarantined from the client build.
-2. **Backend + persistence**: stand up a real API server (or Supabase), move
-   all `real*` service logic server-side, provision Postgres/Redis, and replace
-   the in-memory mock stores.
-3. **Real auth**: server-side JWT/refresh tokens (or Supabase Auth), email
-   verification, and login/register/protected-route flows.
-4. **Autonomy**: a server-side scheduler/worker that runs each agent on its
-   configured frequency (scrape → AI analysis → synthesis → notify).
-5. **Payments & hardening**: Stripe checkout + webhooks, Sentry, tests, and a
+2. **Backend + auth + persistence** (in progress): Supabase Auth + Postgres
+   with RLS; profiles, subscriptions, and agents persist per user; UI wired off
+   mock data for auth and agents. Remaining: article ingestion + saved
+   articles/annotations persistence (depend on real articles from step 3) and
+   admin analytics.
+3. **Autonomy**: a server-side scheduler/worker (e.g. Supabase Edge Functions
+   + cron) that runs each agent on its frequency (scrape → AI analysis →
+   synthesis → notify) and writes `articles`.
+4. **Payments & hardening**: Stripe checkout + webhooks, Sentry, tests, and a
    dependency/security review.

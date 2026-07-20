@@ -1,6 +1,37 @@
 // Database service with user isolation and subscription management
-import { User, SubscriptionTier, authService } from './authService';
+import { User, authService } from './authService';
 import { Agent, Article } from './newsDataService';
+import { supabase, isSupabaseConfigured } from '@/lib/supabase';
+
+interface AgentRow {
+  id: string;
+  name: string;
+  description: string | null;
+  sources: string[] | null;
+  topics: string[] | null;
+  entities: string[] | null;
+  frequency: string;
+  status: 'active' | 'idle' | 'error';
+  articles_collected: number | null;
+  last_run_at: string | null;
+  updated_at: string | null;
+}
+
+function mapRowToAgent(row: AgentRow): Agent {
+  const lastRun = row.last_run_at ?? row.updated_at;
+  return {
+    id: row.id,
+    name: row.name,
+    description: row.description ?? '',
+    sources: row.sources ?? [],
+    topics: row.topics ?? [],
+    entities: row.entities ?? [],
+    frequency: row.frequency,
+    status: row.status,
+    lastUpdate: lastRun ? new Date(lastRun).toLocaleString() : 'Never',
+    articlesCollected: row.articles_collected ?? 0,
+  };
+}
 
 export interface UserData {
   userId: string;
@@ -90,32 +121,81 @@ class DatabaseService {
 
   // User data isolation - all operations require userId
   async getUserData(userId: string): Promise<UserData | null> {
+    if (isSupabaseConfigured && supabase) {
+      const { data, error } = await supabase
+        .from('agents')
+        .select('*')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: true });
+      if (error) throw new Error(error.message);
+      return {
+        userId,
+        agents: (data as AgentRow[]).map(mapRowToAgent),
+        articles: [],
+        savedArticles: [],
+        annotations: {},
+        preferences: {},
+        usage: {},
+      };
+    }
+
     await this.delay(200);
-    
+
     if (!this.isAuthorized(userId)) {
       throw new Error('Unauthorized access');
     }
-    
+
     return this.userData.get(userId) || null;
   }
 
+  /** Convenience: list the current user's agents. */
+  async listAgents(userId: string): Promise<Agent[]> {
+    const data = await this.getUserData(userId);
+    return data?.agents ?? [];
+  }
+
   async createUserAgent(userId: string, agent: Omit<Agent, 'id'>): Promise<Agent> {
+    const user = authService.getCurrentUser();
+    if (!user) throw new Error('User not authenticated');
+    const agentLimit = user.subscription.features.maxAgents;
+
+    if (isSupabaseConfigured && supabase) {
+      const { count, error: countError } = await supabase
+        .from('agents')
+        .select('*', { count: 'exact', head: true })
+        .eq('user_id', userId);
+      if (countError) throw new Error(countError.message);
+      if (agentLimit !== -1 && (count ?? 0) >= agentLimit) {
+        throw new Error(`Agent limit reached. Upgrade to create more agents. Current limit: ${agentLimit}`);
+      }
+
+      const { data, error } = await supabase
+        .from('agents')
+        .insert({
+          user_id: userId,
+          name: agent.name,
+          description: agent.description,
+          sources: agent.sources,
+          topics: agent.topics,
+          entities: agent.entities,
+          frequency: agent.frequency,
+        })
+        .select('*')
+        .single();
+      if (error) throw new Error(error.message);
+      return mapRowToAgent(data as AgentRow);
+    }
+
     await this.delay(500);
-    
+
     if (!this.isAuthorized(userId)) {
       throw new Error('Unauthorized access');
     }
-
-    // Check subscription limits
-    const user = authService.getCurrentUser();
-    if (!user) throw new Error('User not authenticated');
 
     const userData = this.userData.get(userId);
     if (!userData) throw new Error('User data not found');
 
     const currentAgentCount = userData.agents.length;
-    const agentLimit = user.subscription.features.maxAgents;
-    
     if (agentLimit !== -1 && currentAgentCount >= agentLimit) {
       throw new Error(`Agent limit reached. Upgrade to create more agents. Current limit: ${agentLimit}`);
     }
@@ -135,8 +215,30 @@ class DatabaseService {
   }
 
   async updateUserAgent(userId: string, agentId: string, updates: Partial<Agent>): Promise<Agent> {
+    if (isSupabaseConfigured && supabase) {
+      const dbUpdates: Record<string, unknown> = {};
+      if (updates.name !== undefined) dbUpdates.name = updates.name;
+      if (updates.description !== undefined) dbUpdates.description = updates.description;
+      if (updates.sources !== undefined) dbUpdates.sources = updates.sources;
+      if (updates.topics !== undefined) dbUpdates.topics = updates.topics;
+      if (updates.entities !== undefined) dbUpdates.entities = updates.entities;
+      if (updates.frequency !== undefined) dbUpdates.frequency = updates.frequency;
+      if (updates.status !== undefined) dbUpdates.status = updates.status;
+      if (updates.articlesCollected !== undefined) dbUpdates.articles_collected = updates.articlesCollected;
+
+      const { data, error } = await supabase
+        .from('agents')
+        .update(dbUpdates)
+        .eq('id', agentId)
+        .eq('user_id', userId)
+        .select('*')
+        .single();
+      if (error) throw new Error(error.message);
+      return mapRowToAgent(data as AgentRow);
+    }
+
     await this.delay(300);
-    
+
     if (!this.isAuthorized(userId)) {
       throw new Error('Unauthorized access');
     }
@@ -156,8 +258,18 @@ class DatabaseService {
   }
 
   async deleteUserAgent(userId: string, agentId: string): Promise<boolean> {
+    if (isSupabaseConfigured && supabase) {
+      const { error } = await supabase
+        .from('agents')
+        .delete()
+        .eq('id', agentId)
+        .eq('user_id', userId);
+      if (error) throw new Error(error.message);
+      return true;
+    }
+
     await this.delay(200);
-    
+
     if (!this.isAuthorized(userId)) {
       throw new Error('Unauthorized access');
     }

@@ -1,4 +1,6 @@
 // Authentication and user management service
+import { supabase, isSupabaseConfigured } from "@/lib/supabase";
+
 export interface User {
   id: string;
   email: string;
@@ -68,8 +70,36 @@ export interface UsageStats {
   };
 }
 
+const defaultPreferences: UserPreferences = {
+  theme: 'light',
+  emailNotifications: true,
+  pushNotifications: true,
+  weeklyDigest: true,
+  language: 'en',
+  timezone: 'America/New_York',
+};
+
+function defaultUsage(): UsageStats {
+  return {
+    articlesRead: 0,
+    agentsCreated: 0,
+    annotationsMade: 0,
+    articlesShared: 0,
+    lastActiveDate: new Date(),
+    monthlyUsage: {
+      articlesViewed: 0,
+      agentExecutions: 0,
+      dataExported: 0,
+    },
+  };
+}
+
+type AuthListener = (user: User | null) => void;
+
 class AuthService {
   private currentUser: User | null = null;
+  private listeners: Set<AuthListener> = new Set();
+  private initialized = false;
   private subscriptionTiers: SubscriptionTier[] = [
     {
       id: 'free',
@@ -181,8 +211,129 @@ class AuthService {
     },
   ];
 
-  constructor() {
-    this.initializeMockUser();
+  get usesBackend(): boolean {
+    return isSupabaseConfigured;
+  }
+
+  /** Subscribe to auth-state changes. Returns an unsubscribe function. */
+  onChange(listener: AuthListener): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  private notify() {
+    for (const listener of this.listeners) listener(this.currentUser);
+  }
+
+  /**
+   * Load the current session (Supabase) or the demo user (fallback) and start
+   * listening for auth changes. Safe to call more than once.
+   */
+  async initialize(): Promise<void> {
+    if (this.initialized) return;
+    this.initialized = true;
+
+    if (!isSupabaseConfigured || !supabase) {
+      this.initializeMockUser();
+      this.notify();
+      return;
+    }
+
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+    if (session?.user) {
+      await this.loadProfile(session.user.id, session.user.email ?? "");
+    }
+
+    supabase.auth.onAuthStateChange(async (_event, nextSession) => {
+      if (nextSession?.user) {
+        await this.loadProfile(
+          nextSession.user.id,
+          nextSession.user.email ?? "",
+        );
+      } else {
+        this.currentUser = null;
+        this.notify();
+      }
+    });
+  }
+
+  private mapProfileToUser(row: {
+    id: string;
+    email: string;
+    name: string;
+    role: string;
+    subscription_tier: string;
+    subscription_status: string;
+    trial_ends_at: string | null;
+    subscription_ends_at: string | null;
+    preferences: Partial<UserPreferences> | null;
+    usage: Partial<UsageStats> | null;
+    created_at: string;
+    last_login_at: string;
+  }): User {
+    const tier =
+      this.subscriptionTiers.find((t) => t.name === row.subscription_tier) ??
+      this.subscriptionTiers[0];
+
+    return {
+      id: row.id,
+      email: row.email,
+      name: row.name,
+      role: row.role === "admin" ? "admin" : "user",
+      subscription: tier,
+      subscriptionStatus:
+        (row.subscription_status as User["subscriptionStatus"]) ?? "trial",
+      trialEndsAt: row.trial_ends_at ? new Date(row.trial_ends_at) : undefined,
+      subscriptionEndsAt: row.subscription_ends_at
+        ? new Date(row.subscription_ends_at)
+        : undefined,
+      createdAt: new Date(row.created_at),
+      lastLoginAt: new Date(row.last_login_at),
+      preferences: { ...defaultPreferences, ...(row.preferences ?? {}) },
+      usage: {
+        ...defaultUsage(),
+        ...(row.usage ?? {}),
+        monthlyUsage: {
+          ...defaultUsage().monthlyUsage,
+          ...(row.usage?.monthlyUsage ?? {}),
+        },
+      },
+    };
+  }
+
+  private async loadProfile(userId: string, email: string): Promise<void> {
+    if (!supabase) return;
+
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("*")
+      .eq("id", userId)
+      .single();
+
+    if (error || !data) {
+      // Profile row may not exist yet immediately after signup; fall back to a
+      // minimal user so the app can render.
+      this.currentUser = {
+        id: userId,
+        email,
+        name: email.split("@")[0],
+        role: "user",
+        subscription: this.subscriptionTiers[0],
+        subscriptionStatus: "trial",
+        trialEndsAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000),
+        createdAt: new Date(),
+        lastLoginAt: new Date(),
+        preferences: { ...defaultPreferences },
+        usage: defaultUsage(),
+      };
+    } else {
+      this.currentUser = this.mapProfileToUser(data);
+    }
+    this.notify();
   }
 
   private initializeMockUser() {
@@ -221,14 +372,26 @@ class AuthService {
   }
 
   async login(email: string, password: string): Promise<{ success: boolean; user?: User; error?: string }> {
-    // Mock login - in real app this would validate credentials
+    if (isSupabaseConfigured && supabase) {
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
+      if (error || !data.user) {
+        return { success: false, error: error?.message ?? "Invalid credentials" };
+      }
+      await this.loadProfile(data.user.id, data.user.email ?? email);
+      return { success: true, user: this.currentUser ?? undefined };
+    }
+
+    // Demo fallback - accepts any non-empty credentials.
     await this.delay(1000);
-    
     if (email && password) {
+      if (!this.currentUser) this.initializeMockUser();
       this.currentUser!.lastLoginAt = new Date();
+      this.notify();
       return { success: true, user: this.currentUser! };
     }
-    
     return { success: false, error: 'Invalid credentials' };
   }
 
@@ -237,9 +400,25 @@ class AuthService {
     password: string;
     name: string;
   }): Promise<{ success: boolean; user?: User; error?: string }> {
+    if (isSupabaseConfigured && supabase) {
+      const { data, error } = await supabase.auth.signUp({
+        email: userData.email,
+        password: userData.password,
+        options: { data: { name: userData.name } },
+      });
+      if (error) {
+        return { success: false, error: error.message };
+      }
+      // With email confirmation enabled there is no session yet.
+      if (data.session?.user) {
+        await this.loadProfile(data.session.user.id, data.session.user.email ?? userData.email);
+      }
+      return { success: true, user: this.currentUser ?? undefined };
+    }
+
     await this.delay(1500);
-    
-    // Mock registration
+
+    // Demo fallback registration
     const newUser: User = {
       id: `user_${Date.now()}`,
       email: userData.email,
@@ -273,11 +452,16 @@ class AuthService {
     };
     
     this.currentUser = newUser;
+    this.notify();
     return { success: true, user: newUser };
   }
 
   async logout(): Promise<void> {
+    if (isSupabaseConfigured && supabase) {
+      await supabase.auth.signOut();
+    }
     this.currentUser = null;
+    this.notify();
   }
 
   getCurrentUser(): User | null {
@@ -289,17 +473,34 @@ class AuthService {
   }
 
   async upgradeSubscription(tierId: string): Promise<{ success: boolean; error?: string }> {
-    await this.delay(2000);
-    
     const tier = this.subscriptionTiers.find(t => t.id === tierId);
     if (!tier || !this.currentUser) {
       return { success: false, error: 'Invalid subscription tier' };
     }
-    
+
+    const subscriptionEndsAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
+
+    if (isSupabaseConfigured && supabase) {
+      const { error } = await supabase
+        .from("profiles")
+        .update({
+          subscription_tier: tier.name,
+          subscription_status: "active",
+          subscription_ends_at: subscriptionEndsAt.toISOString(),
+        })
+        .eq("id", this.currentUser.id);
+      if (error) {
+        return { success: false, error: error.message };
+      }
+    } else {
+      await this.delay(2000);
+    }
+
     this.currentUser.subscription = tier;
     this.currentUser.subscriptionStatus = 'active';
-    this.currentUser.subscriptionEndsAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
-    
+    this.currentUser.subscriptionEndsAt = subscriptionEndsAt;
+    this.notify();
+
     return { success: true };
   }
 
