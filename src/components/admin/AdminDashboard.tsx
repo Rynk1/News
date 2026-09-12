@@ -1,5 +1,7 @@
 // Comprehensive Admin Dashboard for NewsIntel
 import React, { useState, useEffect } from "react";
+import { databaseService } from "@/services/databaseService";
+import { useAuth } from "@/contexts/AuthContext";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -106,6 +108,7 @@ interface AdminUser {
 }
 
 const AdminDashboard = () => {
+  const { user: currentUser } = useAuth();
   const [stats, setStats] = useState<AdminStats>({
     totalUsers: 1247,
     activeUsers: 892,
@@ -156,44 +159,51 @@ const AdminDashboard = () => {
     ],
   });
 
-  const [users, setUsers] = useState<AdminUser[]>([
-    {
-      id: 'user_123',
-      name: 'Sarah Johnson',
-      email: 'sarah.johnson@company.com',
-      subscription: 'professional',
-      status: 'active',
-      createdAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
-      lastLoginAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
-      agentsCount: 5,
-      monthlyUsage: 1250,
-      totalRevenue: 297,
-    },
-    {
-      id: 'user_456',
-      name: 'John Doe',
-      email: 'john.doe@startup.com',
-      subscription: 'starter',
-      status: 'trial',
-      createdAt: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
-      lastLoginAt: new Date(Date.now() - 30 * 60 * 1000),
-      agentsCount: 2,
-      monthlyUsage: 450,
-      totalRevenue: 0,
-    },
-    {
-      id: 'user_789',
-      name: 'Emily Chen',
-      email: 'emily.chen@enterprise.com',
-      subscription: 'enterprise',
-      status: 'active',
-      createdAt: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000),
-      lastLoginAt: new Date(Date.now() - 10 * 60 * 1000),
-      agentsCount: 25,
-      monthlyUsage: 5000,
-      totalRevenue: 897,
-    },
-  ]);
+  const [users, setUsers] = useState<AdminUser[]>([]);
+  const [loadingUsers, setLoadingUsers] = useState(true);
+  const [loadingStats, setLoadingStats] = useState(true);
+
+  // Load real analytics + users from the data layer (Supabase when configured,
+  // in-memory demo otherwise).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const admin = await databaseService.getAdminAnalytics(currentUser?.id ?? "");
+        if (!cancelled) setStats(admin ?? stats);
+      } catch (err) {
+        console.error("Failed to load admin analytics:", err);
+      } finally {
+        if (!cancelled) setLoadingStats(false);
+      }
+    })();
+    (async () => {
+      try {
+        const list = await databaseService.getAllUsers(currentUser?.id ?? "");
+        const mapped: AdminUser[] = list.map((u) => ({
+          id: u.id,
+          name: u.name ?? u.email ?? "User",
+          email: u.email ?? "—",
+          subscription: u.subscription?.name ?? "free",
+          status: (u.subscriptionStatus as AdminUser["status"]) ?? "active",
+          createdAt: u.createdAt ?? new Date(),
+          lastLoginAt: u.lastLoginAt ?? new Date(),
+          agentsCount: (u as any).agentsCount ?? 0,
+          monthlyUsage: Object.values(u.usage ?? {}).reduce((a, b) => a + Number(b ?? 0), 0),
+          totalRevenue: 0,
+        }));
+        if (!cancelled) setUsers(mapped);
+      } catch (err) {
+        console.error("Failed to load users:", err);
+        if (!cancelled) setUsers([]);
+      } finally {
+        if (!cancelled) setLoadingUsers(false);
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
 
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');

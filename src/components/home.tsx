@@ -1,4 +1,6 @@
 import React, { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
+import { useNews } from "@/contexts/NewsContext";
 import { 
   Bell, 
   Search, 
@@ -8,7 +10,8 @@ import {
   Crown,
   Zap,
   AlertTriangle,
-  Gift
+  Gift,
+  ShieldCheck
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -33,10 +36,13 @@ import type { Agent } from "@/services/newsDataService";
 import { useAuth } from "@/contexts/AuthContext";
 
 const Home = () => {
+  const navigate = useNavigate();
   const [isAgentConfigOpen, setIsAgentConfigOpen] = useState(false);
   const [isSubscriptionModalOpen, setIsSubscriptionModalOpen] = useState(false);
   const [activeTab, setActiveTab] = useState("all");
   const { user: currentUser, signOut } = useAuth();
+  const { state: newsState, actions: newsActions } = useNews();
+  const savedCount = newsState.savedArticles.length;
   const [showUpgradePrompt, setShowUpgradePrompt] = useState(false);
 
   const displayName = currentUser?.name ?? "Guest";
@@ -122,10 +128,16 @@ const Home = () => {
 
   const handleRefreshAll = () => {
     reloadAgents();
+    newsActions.refreshData().catch((err) =>
+      console.error("Failed to refresh articles:", err),
+    );
   };
 
   const handleAgentConfigClose = () => {
     setIsAgentConfigOpen(false);
+    newsActions.refreshData().catch((err) =>
+      console.error("Failed to refresh articles:", err),
+    );
   };
 
   const renderSubscriptionBanner = () => {
@@ -282,11 +294,15 @@ const Home = () => {
                 <Crown className="h-3 w-3 ml-auto text-amber-500" />
               )}
             </Button>
-            <Button variant="ghost" className="w-full justify-start">
+            <Button
+              variant="ghost"
+              className="w-full justify-start"
+              onClick={() => navigate("/saved")}
+            >
               Saved Articles
               {currentUser?.subscription.limits.savedArticles !== -1 && (
                 <span className="ml-auto text-xs text-muted-foreground">
-                  5/{currentUser?.subscription.limits.savedArticles}
+                  {savedCount}/{currentUser?.subscription.limits.savedArticles}
                 </span>
               )}
             </Button>
@@ -303,16 +319,34 @@ const Home = () => {
             <Button 
               variant="ghost" 
               className="w-full justify-start"
-              onClick={() => !currentUser?.subscription.features.advancedAnalytics && setIsSubscriptionModalOpen(true)}
+              onClick={() =>
+                currentUser?.subscription.features.advancedAnalytics
+                  ? navigate("/analytics")
+                  : setIsSubscriptionModalOpen(true)
+              }
             >
               Analytics
               {!currentUser?.subscription.features.advancedAnalytics && (
                 <Crown className="h-3 w-3 ml-auto text-amber-500" />
               )}
             </Button>
-            <Button variant="ghost" className="w-full justify-start">
+            <Button
+              variant="ghost"
+              className="w-full justify-start"
+              onClick={() => navigate("/settings")}
+            >
               Settings
             </Button>
+            {currentUser?.role === "admin" && (
+              <Button
+                variant="ghost"
+                className="w-full justify-start"
+                onClick={() => navigate("/admin")}
+              >
+                <ShieldCheck className="h-4 w-4 mr-2" />
+                Admin Panel
+              </Button>
+            )}
           </div>
 
           <Separator className="my-4" />

@@ -1,7 +1,14 @@
 // Database service with user isolation and subscription management
 import { User, authService } from './authService';
-import { Agent, Article } from './newsDataService';
+import { Agent, Article, TrendingTopic, SentimentData, newsDataService } from './newsDataService';
 import { supabase, isSupabaseConfigured } from '@/lib/supabase';
+import type {
+  AnnotationRow,
+  ArticleRow,
+  SavedArticleRow,
+  AdminAnalytics,
+} from '@/types/supabase';
+import { mockScrape, trendingFromArticles, toArticle } from '@/services/ingestion/pipeline';
 
 interface AgentRow {
   id: string;
@@ -33,12 +40,34 @@ function mapRowToAgent(row: AgentRow): Agent {
   };
 }
 
+function mapRowToArticle(row: ArticleRow): Article {
+  return {
+    id: row.id,
+    title: row.title,
+    source: row.source,
+    date: row.published_at
+      ? new Date(row.published_at).toLocaleString()
+      : new Date(row.created_at).toLocaleString(),
+    sentiment: row.sentiment,
+    category: row.category,
+    keyPoints: row.key_points ?? [],
+    implications: row.implications,
+    summary: row.summary,
+    imageUrl: row.image_url ?? "",
+    articleUrl: row.url ?? undefined,
+  };
+}
+
+interface AnnotatedArticle extends Article {
+  saved?: boolean;
+}
+
 export interface UserData {
   userId: string;
   agents: Agent[];
   articles: Article[];
-  savedArticles: number[];
-  annotations: { [articleId: number]: string[] };
+  savedArticles: string[];
+  annotations: { [articleId: string]: string[] };
   preferences: any;
   usage: any;
 }
@@ -62,8 +91,10 @@ class DatabaseService {
   private initializeMockData() {
     // Initialize mock user data
     const mockUserId = 'user_123';
+    const seedArticles = newsDataService.getBaseArticles();
     this.userData.set(mockUserId, {
       userId: mockUserId,
+      articles: seedArticles,
       agents: [
         {
           id: `${mockUserId}_agent_1`,
@@ -90,7 +121,6 @@ class DatabaseService {
           articlesCollected: 18,
         },
       ],
-      articles: [],
       savedArticles: [],
       annotations: {},
       preferences: {},
@@ -122,18 +152,30 @@ class DatabaseService {
   // User data isolation - all operations require userId
   async getUserData(userId: string): Promise<UserData | null> {
     if (isSupabaseConfigured && supabase) {
-      const { data, error } = await supabase
-        .from('agents')
-        .select('*')
-        .eq('user_id', userId)
-        .order('created_at', { ascending: true });
-      if (error) throw new Error(error.message);
+      const [agentsRes, articlesRes, savedRes, annotationsRes] =
+        await Promise.all([
+          supabase.from('agents').select('*').eq('user_id', userId).order('created_at'),
+          supabase.from('articles').select('*').eq('user_id', userId).order('published_at', { ascending: false }),
+          supabase.from('saved_articles').select('article_id').eq('user_id', userId),
+          supabase.from('annotations').select('*').eq('user_id', userId).order('created_at'),
+        ]);
+
+      for (const res of [agentsRes, articlesRes, savedRes, annotationsRes]) {
+        if (res.error) throw new Error(res.error.message);
+      }
+
+      const savedIds = (savedRes.data as SavedArticleRow[]).map((r) => r.article_id);
+      const annotations: Record<string, string[]> = {};
+      for (const a of annotationsRes.data as AnnotationRow[]) {
+        annotations[a.article_id] = [...(annotations[a.article_id] ?? []), a.body];
+      }
+
       return {
         userId,
-        agents: (data as AgentRow[]).map(mapRowToAgent),
-        articles: [],
-        savedArticles: [],
-        annotations: {},
+        agents: (agentsRes.data as AgentRow[]).map(mapRowToAgent),
+        articles: (articlesRes.data as ArticleRow[]).map(mapRowToArticle),
+        savedArticles: savedIds,
+        annotations,
         preferences: {},
         usage: {},
       };
@@ -146,6 +188,103 @@ class DatabaseService {
     }
 
     return this.userData.get(userId) || null;
+  }
+
+  /**
+   * Return the articles visible in the dashboard for a user. Supabase mode
+   * reads the `articles` table and decorates each row with saved/annotation
+   * state; demo mode returns the in-memory store.
+   */
+  async getArticles(
+    userId: string,
+    filters?: { category?: string; sentiment?: string; search?: string },
+  ): Promise<Article[]> {
+    let articles: AnnotatedArticle[];
+
+    if (isSupabaseConfigured && supabase) {
+      let query = supabase
+        .from('articles')
+        .select('*')
+        .eq('user_id', userId)
+        .order('published_at', { ascending: false });
+      if (filters?.category && filters.category !== 'all') {
+        query = query.eq('category', filters.category);
+      }
+      if (filters?.sentiment && filters.sentiment !== 'all') {
+        query = query.eq('sentiment', filters.sentiment);
+      }
+      const { data, error } = await query;
+      if (error) throw new Error(error.message);
+      articles = (data as ArticleRow[]).map(mapRowToArticle);
+
+      const savedRes = await supabase
+        .from('saved_articles')
+        .select('article_id')
+        .eq('user_id', userId);
+      if (savedRes.error) throw new Error(savedRes.error.message);
+      const savedIds = new Set(
+        (savedRes.data as SavedArticleRow[]).map((r) => r.article_id),
+      );
+
+      const annRes = await supabase
+        .from('annotations')
+        .select('*')
+        .eq('user_id', userId);
+      if (annRes.error) throw new Error(annRes.error.message);
+      const annotations: Record<string, string[]> = {};
+      for (const a of annRes.data as AnnotationRow[]) {
+        annotations[a.article_id] = [...(annotations[a.article_id] ?? []), a.body];
+      }
+
+      articles = articles.map((a) => ({
+        ...a,
+        saved: savedIds.has(a.id),
+        annotations: annotations[a.id] ?? [],
+      }));
+    } else {
+      const userData = this.userData.get(userId);
+      articles = (userData?.articles ?? []).map((a) => ({
+        ...a,
+        saved: userData?.savedArticles.includes(a.id) ?? false,
+        annotations: userData?.annotations[a.id] ?? [],
+      }));
+    }
+
+    // Search filter applies in both modes.
+    if (filters?.search) {
+      const q = filters.search.toLowerCase();
+      articles = articles.filter(
+        (a) =>
+          a.title.toLowerCase().includes(q) ||
+          a.summary.toLowerCase().includes(q) ||
+          a.keyPoints.some((p) => p.toLowerCase().includes(q)),
+      );
+    }
+
+    return articles;
+  }
+
+  /** Aggregate trending topics from the user's stored articles. */
+  async getTrendingTopics(userId: string): Promise<TrendingTopic[]> {
+    const articles = await this.getArticles(userId);
+    return trendingFromArticles(articles);
+  }
+
+  /** Aggregate sentiment percentages from the user's stored articles. */
+  async getSentimentData(userId: string): Promise<SentimentData> {
+    const articles = await this.getArticles(userId);
+    const total = articles.length || 1;
+    const positive = Math.round(
+      (articles.filter((a) => a.sentiment === 'positive').length / total) * 100,
+    );
+    const negative = Math.round(
+      (articles.filter((a) => a.sentiment === 'negative').length / total) * 100,
+    );
+    return {
+      positive,
+      negative,
+      neutral: Math.max(0, 100 - positive - negative),
+    };
   }
 
   /** Convenience: list the current user's agents. */
@@ -288,9 +427,46 @@ class DatabaseService {
     return true;
   }
 
-  async saveUserArticle(userId: string, articleId: number): Promise<boolean> {
+  async saveUserArticle(userId: string, articleId: string): Promise<boolean> {
+    if (isSupabaseConfigured && supabase) {
+      // Toggle behavior: remove when already saved.
+      const { data: existing, error: qError } = await supabase
+        .from('saved_articles')
+        .select('article_id')
+        .eq('user_id', userId)
+        .eq('article_id', articleId)
+        .maybeSingle();
+      if (qError) throw new Error(qError.message);
+
+      if (existing) {
+        const { error } = await supabase
+          .from('saved_articles')
+          .delete()
+          .eq('user_id', userId)
+          .eq('article_id', articleId);
+        if (error) throw new Error(error.message);
+        return true;
+      }
+
+      const user = authService.getCurrentUser();
+      const userData = await this.getUserData(userId);
+      const savedLimit = user?.subscription.limits.savedArticles ?? 10;
+      if (
+        savedLimit !== -1 &&
+        (userData?.savedArticles.length ?? 0) >= savedLimit
+      ) {
+        throw new Error(`Saved articles limit reached. Upgrade to save more articles. Current limit: ${savedLimit}`);
+      }
+
+      const { error } = await supabase
+        .from('saved_articles')
+        .insert({ user_id: userId, article_id: articleId });
+      if (error) throw new Error(error.message);
+      return true;
+    }
+
     await this.delay(200);
-    
+
     if (!this.isAuthorized(userId)) {
       throw new Error('Unauthorized access');
     }
@@ -304,7 +480,7 @@ class DatabaseService {
     // Check subscription limits
     const savedCount = userData.savedArticles.length;
     const savedLimit = user.subscription.limits.savedArticles;
-    
+
     if (savedLimit !== -1 && savedCount >= savedLimit) {
       throw new Error(`Saved articles limit reached. Upgrade to save more articles. Current limit: ${savedLimit}`);
     }
@@ -317,23 +493,106 @@ class DatabaseService {
     return true;
   }
 
-  async addUserAnnotation(userId: string, articleId: number, annotation: string): Promise<boolean> {
+  /** Insert article rows (from the ingestion pipeline) when Supabase is on. */
+  async insertArticles(
+    userId: string,
+    articles: Array<{
+      title: string;
+      source: string;
+      url?: string | null;
+      summary: string;
+      keyPoints: string[];
+      implications: string;
+      category: string;
+      sentiment: Article["sentiment"];
+      imageUrl?: string;
+      articleUrl?: string;
+      publishedAt?: Date;
+    }>,
+    agentId?: string,
+  ): Promise<string[]> {
+    if (!isSupabaseConfigured || !supabase) {
+      // Demo fallback: append the pipeline output to the in-memory store so
+      // scraped articles show up in the dashboard without Supabase configured.
+      const userData = this.userData.get(userId);
+      if (!userData) throw new Error("User data not found");
+      const inserted: Article[] = [];
+      const insertedIds: string[] = [];
+      for (const a of articles) {
+        const id = `ingested_${userId}_${Date.now()}_${insertedIds.length}`;
+        insertedIds.push(id);
+        inserted.push({
+          id,
+          title: a.title,
+          source: a.source,
+          date: (a.publishedAt ?? new Date()).toLocaleString(),
+          sentiment: a.sentiment,
+          category: a.category,
+          keyPoints: a.keyPoints ?? [],
+          implications: a.implications ?? "",
+          summary: a.summary,
+          imageUrl: a.imageUrl ?? "",
+          articleUrl: a.articleUrl ?? a.url ?? undefined,
+        });
+      }
+      // Newest ingested articles first so the dashboard picks them up.
+      userData.articles = [...inserted, ...userData.articles];
+      this.userData.set(userId, userData);
+      return insertedIds;
+    }
+
+    const rows = articles.map((a) => ({
+      user_id: userId,
+      agent_id: agentId ?? null,
+      title: a.title,
+      source: a.source,
+      url: a.url ?? a.articleUrl ?? null,
+      summary: a.summary,
+      key_points: a.keyPoints ?? [],
+      implications: a.implications ?? "",
+      category: a.category ?? "tech",
+      sentiment: a.sentiment ?? "neutral",
+      image_url: a.imageUrl ?? null,
+      published_at: (a.publishedAt ?? new Date()).toISOString(),
+    }));
+
+    const { data, error } = await supabase
+      .from("articles")
+      .insert(rows)
+      .select("id");
+    if (error) throw new Error(error.message);
+    return (data ?? []).map((r) => (r as { id: string }).id);
+  }
+
+  async addUserAnnotation(
+    userId: string,
+    articleId: string,
+    annotation: string,
+  ): Promise<boolean> {
+    if (isSupabaseConfigured && supabase) {
+      const { error } = await supabase
+        .from("annotations")
+        .insert({ user_id: userId, article_id: articleId, body: annotation });
+      if (error) throw new Error(error.message);
+      return true;
+    }
+
     await this.delay(300);
-    
+
     if (!this.isAuthorized(userId)) {
-      throw new Error('Unauthorized access');
+      throw new Error("Unauthorized access");
     }
 
     const user = authService.getCurrentUser();
-    if (!user) throw new Error('User not authenticated');
+    if (!user) throw new Error("User not authenticated");
 
     const userData = this.userData.get(userId);
-    if (!userData) throw new Error('User data not found');
+    if (!userData) throw new Error("User data not found");
 
     // Check subscription limits
     const totalAnnotations = Object.values(userData.annotations).flat().length;
     const annotationLimit = user.subscription.limits.annotations;
-    
+
     if (annotationLimit !== -1 && totalAnnotations >= annotationLimit) {
       throw new Error(`Annotation limit reached. Upgrade to add more annotations. Current limit: ${annotationLimit}`);
     }
@@ -341,7 +600,7 @@ class DatabaseService {
     if (!userData.annotations[articleId]) {
       userData.annotations[articleId] = [];
     }
-    
+
     userData.annotations[articleId].push(annotation);
     this.userData.set(userId, userData);
 
@@ -349,10 +608,19 @@ class DatabaseService {
   }
 
   async trackUserUsage(userId: string, action: string, metadata?: any): Promise<void> {
+    if (isSupabaseConfigured && supabase) {
+      await supabase.from("usage_events").insert({
+        user_id: userId,
+        action,
+        metadata: metadata ?? {},
+      });
+      return;
+    }
+
     await this.delay(100);
-    
+
     if (!this.isAuthorized(userId)) {
-      throw new Error('Unauthorized access');
+      throw new Error("Unauthorized access");
     }
 
     const userData = this.userData.get(userId);
@@ -369,13 +637,13 @@ class DatabaseService {
     }
 
     switch (action) {
-      case 'article_viewed':
+      case "article_viewed":
         userData.usage.articlesViewed++;
         break;
-      case 'agent_executed':
+      case "agent_executed":
         userData.usage.agentExecutions++;
         break;
-      case 'data_exported':
+      case "data_exported":
         userData.usage.dataExported++;
         break;
     }
@@ -386,39 +654,109 @@ class DatabaseService {
 
   // Admin-only functions
   async getAdminAnalytics(adminUserId: string): Promise<any> {
-    await this.delay(500);
-    
     const user = authService.getCurrentUser();
-    if (!user || user.role !== 'admin') {
-      throw new Error('Admin access required');
+    if (!user || user.role !== "admin") {
+      throw new Error("Admin access required");
     }
 
-    return this.adminData.get('analytics');
+    if (isSupabaseConfigured && supabase) {
+      const normalize = <T,>(res: { data: T | null; error: unknown }) => {
+        if (res.error) throw new Error(String(res.error));
+        return res.data ?? [];
+      };
+
+      try {
+        const [profileRes, adminAgentsRes, adminArticlesRes, usageRes] =
+          await Promise.all([
+            supabase.from("profiles").select("role, subscription_tier, subscription_status"),
+            supabase.from("agents").select("id"),
+            supabase.from("articles").select("id"),
+            supabase.from("usage_events").select("action", { count: "exact", head: true }),
+          ]);
+        const profiles = normalize(profileRes);
+        const activeUsers = profiles.filter((p) => p.role === "user").length;
+        const subDist = { free: 0, starter: 0, professional: 0, enterprise: 0 };
+        for (const p of profiles) {
+          const tier = p.subscription_tier as keyof typeof subDist;
+          if (tier in subDist) subDist[tier]++;
+        }
+        return {
+          totalUsers: profiles.length,
+          activeUsers,
+          totalAgents: normalize(adminAgentsRes).length,
+          totalArticles: normalize(adminArticlesRes).length,
+          monthlyRevenue: Math.round(
+            (subDist.starter * 29 + subDist.professional * 99 + subDist.enterprise * 299) * 0.9,
+          ),
+          subscriptionDistribution: subDist,
+          totalUsageEvents: usageRes.count ?? 0,
+        };
+      } catch (err) {
+        // Supabase may not have an admin policy; fall back to demo data.
+        return { ...this.adminData.get("analytics"), demo: true };
+      }
+    }
+
+    await this.delay(500);
+
+    return this.adminData.get("analytics");
   }
 
   async getAllUsers(adminUserId: string): Promise<User[]> {
-    await this.delay(800);
-    
+    await this.delay(400);
+
     const user = authService.getCurrentUser();
-    if (!user || user.role !== 'admin') {
-      throw new Error('Admin access required');
+    if (!user || user.role !== "admin") {
+      throw new Error("Admin access required");
+    }
+
+    if (isSupabaseConfigured && supabase) {
+      const { data, error } = await supabase
+        .from("profiles")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .limit(100);
+      if (error) throw new Error(error.message);
+      return (data ?? []).map((row) => ({
+        id: row.id,
+        email: row.email,
+        name: row.name,
+        role: row.role === "admin" ? "admin" : "user",
+        subscription: authService.getSubscriptionTiers().find((t) => t.name === row.subscription_tier) ?? authService.getSubscriptionTiers()[0],
+        subscriptionStatus: row.subscription_status,
+        createdAt: new Date(row.created_at),
+        lastLoginAt: new Date(row.last_login_at),
+        preferences: row.preferences ?? {},
+        usage: row.usage ?? {},
+      }));
     }
 
     // Mock user list for admin
     return [
       {
-        id: 'user_123',
-        email: 'sarah.johnson@company.com',
-        name: 'Sarah Johnson',
-        role: 'user',
+        id: "user_123",
+        email: "sarah.johnson@company.com",
+        name: "Sarah Johnson",
+        role: "user",
         subscription: authService.getSubscriptionTiers()[0],
-        subscriptionStatus: 'trial',
+        subscriptionStatus: "trial",
         createdAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
         lastLoginAt: new Date(),
         preferences: {} as any,
         usage: {} as any,
       },
-      // Add more mock users...
+      {
+        id: "user_456",
+        email: "john.doe@startup.com",
+        name: "John Doe",
+        role: "user",
+        subscription: authService.getSubscriptionTiers()[1],
+        subscriptionStatus: "active",
+        createdAt: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
+        lastLoginAt: new Date(),
+        preferences: {} as any,
+        usage: {} as any,
+      },
     ];
   }
 

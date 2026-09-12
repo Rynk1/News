@@ -1,5 +1,7 @@
 import React, { createContext, useContext, useReducer, useEffect } from "react";
-import { newsDataService, Article, Agent, TrendingTopic, SentimentData } from "../services/newsDataService";
+import { Article, Agent, TrendingTopic, SentimentData } from "../services/newsDataService";
+import { databaseService } from "../services/databaseService";
+import { authService } from "../services/authService";
 
 interface NewsState {
   articles: Article[];
@@ -9,7 +11,7 @@ interface NewsState {
   isLoading: boolean;
   error: string | null;
   lastRefresh: Date;
-  savedArticles: number[];
+  savedArticles: string[];
   notifications: Notification[];
 }
 
@@ -26,12 +28,13 @@ type NewsAction =
   | { type: "SET_LOADING"; payload: boolean }
   | { type: "SET_ERROR"; payload: string | null }
   | { type: "SET_ARTICLES"; payload: Article[] }
+  | { type: "SET_SAVED_ARTICLES"; payload: string[] }
   | { type: "SET_AGENTS"; payload: Agent[] }
   | { type: "SET_TRENDING_TOPICS"; payload: TrendingTopic[] }
   | { type: "SET_SENTIMENT_DATA"; payload: SentimentData }
   | { type: "SET_LAST_REFRESH"; payload: Date }
-  | { type: "TOGGLE_ARTICLE_SAVE"; payload: number }
-  | { type: "ADD_ANNOTATION"; payload: { articleId: number; annotation: string } }
+  | { type: "TOGGLE_ARTICLE_SAVE"; payload: string }
+  | { type: "ADD_ANNOTATION"; payload: { articleId: string; annotation: string } }
   | { type: "ADD_NOTIFICATION"; payload: Notification }
   | { type: "MARK_NOTIFICATION_READ"; payload: number }
   | { type: "UPDATE_AGENT"; payload: Agent }
@@ -120,6 +123,8 @@ function newsReducer(state: NewsState, action: NewsAction): NewsState {
       return { ...state, error: action.payload, isLoading: false };
     case "SET_ARTICLES":
       return { ...state, articles: action.payload, isLoading: false };
+    case "SET_SAVED_ARTICLES":
+      return { ...state, savedArticles: action.payload };
     case "SET_AGENTS":
       return { ...state, agents: action.payload };
     case "SET_TRENDING_TOPICS":
@@ -130,10 +135,17 @@ function newsReducer(state: NewsState, action: NewsAction): NewsState {
       return { ...state, lastRefresh: action.payload };
     case "TOGGLE_ARTICLE_SAVE": {
       const articleId = action.payload;
-      const savedArticles = state.savedArticles.includes(articleId)
-        ? state.savedArticles.filter(id => id !== articleId)
-        : [...state.savedArticles, articleId];
-      return { ...state, savedArticles };
+      const isNowSaved = !state.savedArticles.includes(articleId);
+      const savedArticles = isNowSaved
+        ? [...state.savedArticles, articleId]
+        : state.savedArticles.filter(id => id !== articleId);
+      return {
+        ...state,
+        savedArticles,
+        articles: state.articles.map(article =>
+          article.id === articleId ? { ...article, saved: isNowSaved } : article,
+        ),
+      };
     }
     case "ADD_ANNOTATION":
       return {
@@ -191,9 +203,9 @@ interface NewsContextType {
     loadTrendingTopics: () => Promise<void>;
     loadSentimentData: () => Promise<void>;
     refreshData: () => Promise<void>;
-    saveArticle: (articleId: number) => Promise<void>;
-    addAnnotation: (articleId: number, annotation: string) => Promise<void>;
-    shareArticle: (articleId: number, method: string) => Promise<void>;
+    saveArticle: (articleId: string) => Promise<void>;
+    addAnnotation: (articleId: string, annotation: string) => Promise<void>;
+    shareArticle: (articleId: string, method: string) => Promise<void>;
     markNotificationRead: (notificationId: number) => void;
     updateAgent: (agent: Agent) => void;
     deleteAgent: (agentId: string) => void;
@@ -210,8 +222,15 @@ export function NewsProvider({ children }: { children: React.ReactNode }) {
     loadArticles: async (filters?: { category?: string; sentiment?: string; search?: string }) => {
       dispatch({ type: "SET_LOADING", payload: true });
       try {
-        const articles = await newsDataService.getArticles(filters);
+        const user = authService.getCurrentUser();
+        if (!user) {
+          dispatch({ type: "SET_ARTICLES", payload: [] });
+          return;
+        }
+        const articles = await databaseService.getArticles(user.id, filters);
+        const savedIds = articles.filter((a) => a.saved).map((a) => a.id);
         dispatch({ type: "SET_ARTICLES", payload: articles });
+        dispatch({ type: "SET_SAVED_ARTICLES", payload: savedIds });
       } catch (error) {
         dispatch({ type: "SET_ERROR", payload: "Failed to load articles" });
       }
@@ -219,7 +238,9 @@ export function NewsProvider({ children }: { children: React.ReactNode }) {
 
     loadTrendingTopics: async () => {
       try {
-        const topics = await newsDataService.getTrendingTopics();
+        const user = authService.getCurrentUser();
+        if (!user) return;
+        const topics = await databaseService.getTrendingTopics(user.id);
         dispatch({ type: "SET_TRENDING_TOPICS", payload: topics });
       } catch (error) {
         console.error("Failed to load trending topics:", error);
@@ -228,7 +249,9 @@ export function NewsProvider({ children }: { children: React.ReactNode }) {
 
     loadSentimentData: async () => {
       try {
-        const sentimentData = await newsDataService.getSentimentData();
+        const user = authService.getCurrentUser();
+        if (!user) return;
+        const sentimentData = await databaseService.getSentimentData(user.id);
         dispatch({ type: "SET_SENTIMENT_DATA", payload: sentimentData });
       } catch (error) {
         console.error("Failed to load sentiment data:", error);
@@ -238,13 +261,11 @@ export function NewsProvider({ children }: { children: React.ReactNode }) {
     refreshData: async () => {
       dispatch({ type: "SET_LOADING", payload: true });
       try {
-        await newsDataService.refreshData();
         await actions.loadArticles();
         await actions.loadTrendingTopics();
         await actions.loadSentimentData();
         dispatch({ type: "SET_LAST_REFRESH", payload: new Date() });
-        
-        // Add a notification about the refresh
+
         const notification: Notification = {
           id: Date.now(),
           title: "Data refreshed",
@@ -259,30 +280,34 @@ export function NewsProvider({ children }: { children: React.ReactNode }) {
       }
     },
 
-    saveArticle: async (articleId: number) => {
+    saveArticle: async (articleId: string) => {
+      const user = authService.getCurrentUser();
+      if (!user) return;
       try {
-        await newsDataService.saveArticle(articleId);
+        await databaseService.saveUserArticle(user.id, articleId);
         dispatch({ type: "TOGGLE_ARTICLE_SAVE", payload: articleId });
       } catch (error) {
         console.error("Failed to save article:", error);
       }
     },
 
-    addAnnotation: async (articleId: number, annotation: string) => {
+    addAnnotation: async (articleId: string, annotation: string) => {
+      const user = authService.getCurrentUser();
+      if (!user) return;
       try {
-        await newsDataService.addAnnotation(articleId, annotation);
+        await databaseService.addUserAnnotation(user.id, articleId, annotation);
         dispatch({ type: "ADD_ANNOTATION", payload: { articleId, annotation } });
       } catch (error) {
         console.error("Failed to add annotation:", error);
       }
     },
 
-    shareArticle: async (articleId: number, method: string) => {
-      try {
-        await newsDataService.shareArticle(articleId, method);
-      } catch (error) {
-        console.error("Failed to share article:", error);
-      }
+    shareArticle: async (articleId: string, method: string) => {
+      const user = authService.getCurrentUser();
+      await databaseService.trackUserUsage(user?.id ?? "", "article_shared", {
+        articleId,
+        method,
+      });
     },
 
     markNotificationRead: (notificationId: number) => {
@@ -302,11 +327,16 @@ export function NewsProvider({ children }: { children: React.ReactNode }) {
     },
   };
 
-  // Load initial data
+
+
+  // Load initial data whenever the signed-in user changes.
   useEffect(() => {
+    const user = authService.getCurrentUser();
+    if (!user) return;
     actions.loadArticles();
     actions.loadTrendingTopics();
     actions.loadSentimentData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (
