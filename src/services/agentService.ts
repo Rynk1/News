@@ -231,10 +231,19 @@ class AgentService {
       task.error = err instanceof Error ? err.message : 'Failed to persist articles';
     }
 
-    // Update agent stats when Supabase showed newly inserted rows.
+    // Update agent stats whenever the ingestion produced new content. In
+    // Supabase mode insertedIds reflects fresh rows; in demo mode the pipeline
+    // output is prepended to the in-memory store, so use it directly so the
+    // dashboard timestamp/articles count stays accurate.
     if (insertedIds.length > 0) {
       await databaseService.updateUserAgent(user.id, agent.id, {
         articlesCollected: agent.articlesCollected + insertedIds.length,
+        status: 'active',
+        lastUpdate: new Date().toLocaleString(),
+      });
+    } else if (result.articles.length > 0 && !import.meta.env.PROD) {
+      await databaseService.updateUserAgent(user.id, agent.id, {
+        articlesCollected: agent.articlesCollected + result.articles.length,
         status: 'active',
         lastUpdate: new Date().toLocaleString(),
       });
@@ -249,6 +258,31 @@ class AgentService {
     };
   }
 
+  /** Articles stored for the user that belong to an agent (via userData). */
+  private async getAgentArticles(userId: string, agentId: string): Promise<Article[]> {
+    const userData = await databaseService.getUserData(userId);
+    if (!userData) return [];
+
+    const assigned = userData.articles.filter(a =>
+      (a as Article & { agentId?: string }).agentId === agentId
+    );
+    if (assigned.length > 0) return assigned;
+
+    // Legacy seed data has no agentId; attribute by topic/entity affinity.
+    const agent = userData.agents.find(g => g.id === agentId);
+    if (!agent) return [];
+    const keywords = [...agent.topics, ...agent.entities].filter(Boolean);
+    return userData.articles.filter(a => {
+      const text = `${a.title} ${a.summary}`.toLowerCase();
+      return keywords.some(k => text.includes(k.toLowerCase()));
+    });
+  }
+
+  private countMentions(text: string, keywords: string[]): number {
+    const lower = text.toLowerCase();
+    return keywords.filter(k => k && lower.includes(k.toLowerCase())).length;
+  }
+
   private async performContentAnalysis(task: AgentTask, agent: Agent): Promise<void> {
     const user = authService.getCurrentUser();
     if (!user) throw new Error('User not authenticated');
@@ -257,31 +291,81 @@ class AgentService {
       throw new Error('Advanced analytics not available in your plan');
     }
 
-    task.progress = 25;
-    await this.delay(1500);
-    
-    // Enhanced analysis for paid users
-    const analysisResults = {
-      sentimentDistribution: {
-        positive: 45,
-        neutral: 35,
-        negative: 20,
-      },
-      topEntities: agent.entities.slice(0, user.subscription.features.aiSynthesis ? 10 : 3),
-      emergingTopics: user.subscription.features.aiSynthesis ? 
-        ['AI Ethics', 'Quantum Computing', 'Green Technology', 'Web3', 'Metaverse'] :
-        ['AI Ethics', 'Green Technology'],
-      riskFactors: user.subscription.features.aiSynthesis ? 
-        ['Market Volatility', 'Regulatory Changes', 'Supply Chain Disruptions'] :
-        ['Market Volatility'],
-      opportunities: user.subscription.features.aiSynthesis ? 
-        ['New Market Segments', 'Technology Partnerships', 'Sustainability Initiatives'] :
-        ['New Market Segments'],
-      confidenceScore: user.subscription.features.aiSynthesis ? 0.92 : 0.75,
+    task.progress = 20;
+    const articles = await this.getAgentArticles(user.id, agent.id);
+    if (articles.length === 0) {
+      throw new Error(
+        `No articles collected yet for "${agent.name}". Run Scrape first.`,
+      );
+    }
+
+    task.progress = 50;
+    await this.delay(400);
+
+    // --- Real analysis over the agent's stored articles -------------------
+    const sentimentDistribution = {
+      positive: articles.filter(a => a.sentiment === 'positive').length,
+      neutral: articles.filter(a => a.sentiment === 'neutral').length,
+      negative: articles.filter(a => a.sentiment === 'negative').length,
     };
-    
-    task.progress = 100;
-    task.results = analysisResults;
+
+    // Entity mention counts across all article copy.
+    const entityMentions = agent.entities
+      .map(entity => ({
+        entity,
+        mentions: articles.reduce(
+          (sum, a) => sum + this.countMentions(`${a.title} ${a.summary}`, [entity]),
+          0,
+        ),
+      }))
+      .filter(e => e.mentions > 0)
+      .sort((a, b) => b.mentions - a.mentions);
+
+    // Topic / category signal from the article set.
+    const leadingCategories = Array.from(
+      articles.reduce(
+        (map, a) => map.set(a.category, (map.get(a.category) ?? 0) + 1),
+        new Map<string, number>(),
+      ).entries(),
+    ).sort((a, b) => b[1] - a[1]).slice(0, 5);
+
+    const emergingTopics = agent.topics
+      .map(topic => {
+        const mentions = articles.reduce(
+          (sum, a) => sum + this.countMentions(`${a.title} ${a.summary}`, [topic]),
+          0,
+        );
+        return { topic, mentions };
+      })
+      .filter(t => t.mentions > 0)
+      .sort((a, b) => b.mentions - a.mentions)
+      .slice(0, 5);
+
+    const total = articles.length;
+    const negativeRatio = sentimentDistribution.negative / total;
+    const riskLevel = negativeRatio > 0.5 ? 'High' : negativeRatio > 0.25 ? 'Medium' : 'Low';
+
+    const riskFactors = articles
+      .filter(a => a.sentiment === 'negative')
+      .map(a => a.title)
+      .slice(0, 5);
+    const opportunities = leadingCategories
+      .filter(([cat]) => cat)
+      .slice(0, 3)
+      .map(([cat]) => `Growing coverage in ${cat}`);
+
+    task.progress = 90;
+    task.results = {
+      analyzedCount: articles.length,
+      sentimentDistribution,
+      entityMentions,
+      leadingCategories,
+      emergingTopics,
+      riskLevel,
+      riskFactors,
+      opportunities,
+      confidenceScore: Math.min(0.98, 0.7 + total * 0.02),
+    };
   }
 
   private async performContentSynthesis(task: AgentTask, agent: Agent): Promise<void> {
@@ -293,37 +377,71 @@ class AgentService {
     }
 
     task.progress = 30;
-    await this.delay(2000);
-    
-    // Premium synthesis results
-    const synthesisResults = {
-      executiveSummary: `Based on comprehensive analysis of ${agent.sources.length} premium sources, key trends in ${agent.topics.join(', ')} show significant developments. Market sentiment remains cautiously optimistic with emerging opportunities in AI and sustainability sectors. Our AI analysis indicates a 78% probability of continued growth in these areas.`,
-      keyInsights: [
-        'AI regulation frameworks are accelerating globally with 15 new policies in Q1',
-        'Supply chain resilience investments increased 34% YoY across Fortune 500',
-        'Sustainability initiatives are driving new business models worth $2.3T market',
-        'Remote work productivity tools show 23% adoption increase in enterprise',
-      ],
-      actionableRecommendations: [
-        'Consider establishing AI governance committee by Q2 2024',
-        'Evaluate supply chain diversification options in Southeast Asia',
-        'Explore partnerships in green technology sector - 12 potential targets identified',
-        'Implement hybrid work policy based on productivity data analysis',
-      ],
-      riskAssessment: 'Medium-Low - Monitor regulatory developments closely, particularly EU AI Act implementation',
-      marketOpportunities: [
-        'AI-powered supply chain solutions ($45B market by 2026)',
-        'Sustainable technology partnerships (projected 67% ROI)',
-        'Remote collaboration tools for enterprise (growing 28% annually)',
-      ],
+    const articles = await this.getAgentArticles(user.id, agent.id);
+    if (articles.length === 0) {
+      throw new Error(
+        `No articles collected yet for "${agent.name}". Run Scrape first.`,
+      );
+    }
+
+    await this.delay(600);
+    task.progress = 70;
+
+    // --- Synthesis derived from the agent's actual stored articles ---------
+    const total = articles.length;
+    const positive = articles.filter(a => a.sentiment === 'positive').length;
+    const outlook =
+      positive / total > 0.5 ? 'cautiously optimistic'
+      : positive / total >= 0.3 ? 'mixed'
+      : 'cautious';
+
+    const topTitles = articles
+      .slice(0, 5)
+      .map(a => a.title)
+      .map(t => t.replace(/\s+/g, ' ').trim());
+
+    const keyTopics = agent.topics.length ? agent.topics.slice(0, 3).join(', ') : 'the monitored space';
+    const entityList = (agent.entities.length ? agent.entities.slice(0, 3).join(', ') : 'key players');
+
+    const distinctTopics = [...new Set(articles.map(a => a.category).filter(Boolean))];
+    const topicDetail = distinctTopics.length
+      ? `Coverage clusters around ${distinctTopics.slice(0, 4).join(', ')}.`
+      : '';
+
+    const strongInsights = articles
+      .filter(a => a.sentiment === 'positive')
+      .slice(0, 2)
+      .map(a => a.title);
+
+    const weakInsights = articles
+      .filter(a => a.sentiment === 'negative')
+      .slice(0, 2)
+      .map(a => a.title);
+
+    const keyInsights = [
+      ...(strongInsights.length ? [`Positive signal: ${strongInsights[0]}`] : []),
+      ...(weakInsights.length ? [`Watch item: ${weakInsights[0]}`] : []),
+      ...(distinctTopics.length ? [`Active themes: ${distinctTopics.slice(0, 4).join(', ')}.`] : []),
+    ];
+
+    const recommendations = [
+      `Monitor ${keyTopics} developments weekly for shifts in ${entityList}.`,
+      ...(weakInsights.length ? [`Prepare a response plan for negative coverage around ${weakInsights[0].slice(0, 60)}.`] : []),
+      ...(strongInsights.length ? [`Double down on momentum: capitalize on ${strongInsights[0].slice(0, 60)}.`] : []),
+    ];
+
+    task.results = {
+      executiveSummary: `Based on ${total} articles across ${agent.sources.length} sources, sentiment in ${keyTopics} is ${outlook}. ${topicDetail} Sentiment split is ${positive}/${total} positive, ${articles.filter(a => a.sentiment === 'negative').length}/${total} negative.`,
+      keyInsights: keyInsights.slice(0, 5),
+      actionableRecommendations: recommendations.slice(0, 4),
+      topStories: topTitles.slice(0, 5),
+      riskAssessment: `${agent.entities.slice(0, 2).join(', ') || 'Monitored entities'} exposure is ${articles.filter(a => a.sentiment === 'negative').length}/${total} negative-covered stories.`,
+      marketOpportunities: distinctTopics.slice(0, 3).map(cat => `${cat} category showing coverage momentum`),
       competitiveIntelligence: {
-        threats: ['New market entrants in AI space', 'Regulatory compliance costs'],
-        advantages: ['Early adoption of sustainable practices', 'Strong remote work infrastructure'],
+        threats: articles.filter(a => a.sentiment === 'negative').slice(0, 3).map(a => a.title),
+        advantages: articles.filter(a => a.sentiment === 'positive').slice(0, 3).map(a => a.title),
       },
     };
-    
-    task.progress = 100;
-    task.results = synthesisResults;
   }
 
   private async performRealTimeMonitoring(task: AgentTask, agent: Agent): Promise<void> {
@@ -334,25 +452,76 @@ class AgentService {
       throw new Error('Real-time monitoring not available in your plan');
     }
 
-    // Enhanced monitoring for paid users
-    const monitoringResults = {
-      alertsGenerated: Math.floor(Math.random() * 8) + 2,
-      newArticles: Math.floor(Math.random() * 15) + 5,
-      significantChanges: [
-        'Sudden spike in AI regulation mentions (+340% in last 4 hours)',
-        'New competitor announcement detected: TechCorp AI division launch',
-        'Market sentiment shift: Supply chain stocks up 12% after positive news',
-      ],
-      realTimeAlerts: user.subscription.features.realTimeMonitoring ? [
-        { type: 'urgent', message: 'Breaking: Major acquisition in your tracked entities' },
-        { type: 'opportunity', message: 'Positive sentiment surge in sustainability sector' },
-      ] : [],
-      nextCheck: new Date(Date.now() + this.getFrequencyMs(agent.frequency)),
-      monitoringQuality: user.subscription.features.realTimeMonitoring ? 'Premium' : 'Standard',
+    task.progress = 15;
+
+    // A real "check": re-run the ingestion pipeline the same way a scrape
+    // does. The pipeline is deterministic in demo mode so alerting is based
+    // on whether the check actually surfaced anything new.
+    const result = await runIngestionForAgent(agent, {
+      preferMock: import.meta.env.DEV ? false : undefined,
+    });
+
+    task.progress = 60;
+
+    let insertedIds: string[] = [];
+    try {
+      insertedIds = await databaseService.insertArticles(
+        user.id,
+        result.articles,
+        agent.id,
+      );
+    } catch (err) {
+      task.error = err instanceof Error ? err.message : 'Failed to persist monitored articles';
+    }
+
+    if (insertedIds.length > 0) {
+      await databaseService.updateUserAgent(user.id, agent.id, {
+        articlesCollected: agent.articlesCollected + insertedIds.length,
+        status: 'active',
+        lastUpdate: new Date().toLocaleString(),
+      });
+    } else if (result.articles.length > 0 && !import.meta.env.PROD) {
+      await databaseService.updateUserAgent(user.id, agent.id, {
+        articlesCollected: agent.articlesCollected + result.articles.length,
+        status: 'active',
+        lastUpdate: new Date().toLocaleString(),
+      });
+    }
+
+    task.progress = 90;
+
+    const newArticles = insertedIds.length > 0
+      ? insertedIds.length
+      : !import.meta.env.PROD
+        ? result.articles.length
+        : 0;
+
+    const alerts =
+      newArticles > 0
+        ? [
+            {
+              type: 'info',
+              message: `${newArticles} new article${newArticles > 1 ? 's' : ''} detected for ${agent.name} from ${[...new Set(result.sourcesScanned)].slice(0, 3).join(', ') || 'monitored sources'}.`,
+            },
+          ]
+        : [
+            {
+              type: 'success',
+              message: `No new articles found for ${agent.name} — sources are up to date.`,
+            },
+          ];
+
+    task.results = {
+      checkedAt: new Date().toLocaleString(),
+      articlesChecked: result.articles.length,
+      newArticles,
+      sourcesScanned: result.sourcesScanned,
+      usedFallback: result.usedFallback,
+      errors: result.errors,
+      alerts,
+      nextCheck: new Date(Date.now() + this.getFrequencyMs(agent.frequency)).toLocaleString(),
+      monitoringQuality: 'Standard',
     };
-    
-    task.progress = 100;
-    task.results = monitoringResults;
   }
 
   private async mockScrapeSource(source: string, topics: string[], entities: string[], enhancedMode: boolean): Promise<ScrapingResult[]> {

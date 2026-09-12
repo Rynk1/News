@@ -59,6 +59,130 @@ interface AgentConfigPanelProps {
   onClose?: () => void;
 }
 
+function AgentTaskResults({ task }: { task: AgentTask }) {
+  const results = task.results as any;
+  if (!results) return null;
+
+  const renderList = (label: string, items: unknown[]) => {
+    if (!Array.isArray(items) || items.length === 0) return null;
+    return (
+      <div className="mt-2">
+        <p className="text-xs font-semibold text-foreground">{label}</p>
+        <ul className="mt-1 space-y-1">
+          {items.slice(0, 5).map((item: any, i) => (
+            <li key={i} className="text-xs text-muted-foreground break-words">
+              • {typeof item === "string" ? item : JSON.stringify(item)}
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  };
+
+  const renderObj = (label: string, obj: Record<string, unknown>) => {
+    if (!obj || typeof obj !== "object") return null;
+    const entries = Object.entries(obj).filter(([, v]) => Number(v) > 0);
+    if (entries.length === 0) return null;
+    return (
+      <div className="mt-2">
+        <p className="text-xs font-semibold text-foreground">{label}</p>
+        <p className="mt-1 text-xs text-muted-foreground">
+          {entries.map(([k, v]) => `${k}: ${v}`).join(" • ")}
+        </p>
+      </div>
+    );
+  };
+
+  const renderText = (label: string, value?: string) => {
+    if (!value) return null;
+    return (
+      <div className="mt-2">
+        <p className="text-xs font-semibold text-foreground">{label}</p>
+        <p className="mt-1 text-xs text-muted-foreground break-words">{value}</p>
+      </div>
+    );
+  };
+
+  return (
+    <div className="mt-3 rounded-md border border-border bg-muted/40 p-3 space-y-1">
+      {task.type === "scrape" && (
+        <>
+          <div className="text-xs text-muted-foreground">
+            <span className="font-semibold text-foreground">{results.articlesFound ?? 0}</span>{" "}
+            articles ingested
+            {typeof results.usedFallback === "boolean" && (
+              <span className="ml-1">(using {results.usedFallback ? "demo fallback" : "live sources"})</span>
+            )}
+          </div>
+          {renderList("Sources scanned", results.sourcesScanned)}
+          {renderList("Errors", results.errors)}
+        </>
+      )}
+
+      {task.type === "analyze" && (
+        <>
+          <div className="text-xs text-muted-foreground">
+            <span className="font-semibold text-foreground">{results.analyzedCount ?? 0}</span>{" "}
+            articles analyzed
+            {results.riskLevel && (
+              <span className="ml-1">Risk: <span className="font-semibold">{results.riskLevel}</span></span>
+            )}
+          </div>
+          {renderObj("Sentiment distribution", results.sentimentDistribution)}
+          {Array.isArray(results.emergingTopics) && results.emergingTopics.length > 0 && (
+            <div className="mt-2">
+              <p className="text-xs font-semibold text-foreground">Emerging topics</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {results.emergingTopics.map((t: any) => `${t.topic} (${t.mentions})`).join(" • ")}
+              </p>
+            </div>
+          )}
+          {Array.isArray(results.entityMentions) && results.entityMentions.length > 0 && (
+            <div className="mt-2">
+              <p className="text-xs font-semibold text-foreground">Entity mentions</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {results.entityMentions.slice(0, 4).map((e: any) => `${e.entity}: ${e.mentions}`).join(" • ")}
+              </p>
+            </div>
+          )}
+          {renderList("Risk factors", results.riskFactors)}
+          {renderList("Opportunities", results.opportunities)}
+        </>
+      )}
+
+      {task.type === "synthesize" && (
+        <>
+          {renderText("Executive summary", results.executiveSummary)}
+          {renderList("Key insights", results.keyInsights)}
+          {renderList("Actionable recommendations", results.actionableRecommendations)}
+          {renderList("Top stories", results.topStories)}
+          {renderText("Risk assessment", results.riskAssessment)}
+        </>
+      )}
+
+      {task.type === "monitor" && (
+        <>
+          <div className="text-xs text-muted-foreground">
+            <span className="font-semibold text-foreground">{results.newArticles ?? 0}</span>{" "}
+            new articles found • Checked {results.checkedAt}
+          </div>
+          {renderText("Next check", results.nextCheck)}
+          {Array.isArray(results.alerts) && results.alerts.length > 0 && (
+            <div className="mt-2 space-y-1">
+              {results.alerts.map((a: any, i: number) => (
+                <div key={i} className={`text-xs ${a.type === "success" ? "text-green-700" : "text-blue-700"}`}>
+                  {a.message}
+                </div>
+              ))}
+            </div>
+          )}
+          {renderList("Sources checked", results.sourcesScanned)}
+        </>
+      )}
+    </div>
+  );
+}
+
 const AgentConfigPanel = ({
   open = true,
   onOpenChange,
@@ -147,6 +271,14 @@ const AgentConfigPanel = ({
     });
     setRunningTasks(agentService.getRunningTasks());
   }, [agents]);
+
+  useEffect(() => {
+    // Poll running tasks so completed results render in the panel.
+    const interval = window.setInterval(() => {
+      setRunningTasks(agentService.getRunningTasks());
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, []);
 
   const handleClose = () => {
     if (onClose) {
@@ -400,6 +532,15 @@ const AgentConfigPanel = ({
       >
         <Save className="h-3 w-3 mr-1" />
         Synthesize
+      </Button>
+      <Button
+        variant="outline"
+        size="sm"
+        onClick={() => handleRunAgentTask(agent, 'monitor')}
+        className="text-xs h-7"
+      >
+        <Pause className="h-3 w-3 mr-1" />
+        Monitor
       </Button>
     </div>
   );
@@ -760,6 +901,10 @@ const AgentConfigPanel = ({
                             <div className="text-red-600 mt-1">Error: {task.error}</div>
                           )}
                         </div>
+
+                        {task.status === "completed" && task.results && (
+                          <AgentTaskResults task={task} />
+                        )}
                       </CardContent>
                     </Card>
                   ))

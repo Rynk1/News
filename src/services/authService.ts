@@ -343,8 +343,8 @@ class AuthService {
       email: 'sarah.johnson@company.com',
       name: 'Sarah Johnson',
       role: 'user',
-      subscription: this.subscriptionTiers[0], // Free tier
-      subscriptionStatus: 'trial',
+      subscription: this.subscriptionTiers[2], // Professional tier (demo fallback) so all agent actions are usable
+      subscriptionStatus: 'active',
       trialEndsAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days from now
       createdAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000), // 30 days ago
       lastLoginAt: new Date(),
