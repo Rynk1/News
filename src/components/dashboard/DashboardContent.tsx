@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState } from "react";
 import {
   Card,
   CardContent,
@@ -25,9 +25,10 @@ import {
   PieChart,
   List,
   Grid3X3,
+  Loader2,
 } from "lucide-react";
 import ArticleDigest from "./ArticleDigest";
-import type { Article } from "@/services/newsDataService";
+import { useNews } from "@/contexts/NewsContext";
 
 interface DashboardContentProps {
   category?: string;
@@ -38,168 +39,52 @@ const DashboardContent = ({
   category = "all",
   onConfigureAgent = () => {},
 }: DashboardContentProps) => {
+  const { state, actions } = useNews();
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
   const [selectedFilter, setSelectedFilter] = useState("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [lastRefresh, setLastRefresh] = useState(new Date());
 
-  // Mock data for demonstration
-  const trendingTopics = [
-    { id: 1, name: "AI Regulation", count: 24 },
-    { id: 2, name: "Market Volatility", count: 18 },
-    { id: 3, name: "Supply Chain", count: 15 },
-    { id: 4, name: "Sustainability", count: 12 },
-    { id: 5, name: "Remote Work", count: 10 },
-  ];
-
-  // Enhanced mock articles with categories
-  const mockArticles: Article[] = [
-    {
-      id: 1,
-      title: "AI Regulation Framework Proposed by EU Commission",
-      source: "Financial Times",
-      date: "2 hours ago",
-      sentiment: "neutral",
-      category: "regulatory",
-      keyPoints: [
-        "EU Commission proposes new AI regulatory framework",
-        "Framework focuses on high-risk AI applications",
-        "Compliance deadline set for Q3 2024",
-      ],
-      implications:
-        "May require adjustments to current AI development roadmap and compliance processes.",
-      summary: "The European Union has unveiled comprehensive AI regulation proposals that could reshape how companies develop and deploy artificial intelligence systems across various industries.",
-      imageUrl:
-        "https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=400&q=80",
-    },
-    {
-      id: 2,
-      title:
-        "Global Supply Chain Disruptions Expected to Continue Through 2024",
-      source: "Bloomberg",
-      date: "5 hours ago",
-      sentiment: "negative",
-      category: "market",
-      keyPoints: [
-        "Shipping costs increased by 25% since January",
-        "Semiconductor shortages affecting multiple industries",
-        "Asian manufacturing hubs facing continued challenges",
-      ],
-      implications:
-        "Consider diversifying suppliers and increasing inventory buffers for critical components.",
-      summary: "Supply chain experts warn that ongoing disruptions will persist well into 2024, with companies needing to adapt their procurement and inventory strategies.",
-      imageUrl:
-        "https://images.unsplash.com/photo-1586528116311-ad8dd3c8310d?w=400&q=80",
-    },
-    {
-      id: 3,
-      title: "Major Tech Companies Announce New Sustainability Initiatives",
-      source: "Reuters",
-      date: "1 day ago",
-      sentiment: "positive",
-      category: "tech",
-      keyPoints: [
-        "Combined $5B investment in renewable energy infrastructure",
-        "Carbon neutrality targets moved up by 5 years",
-        "New partnerships with environmental organizations",
-      ],
-      implications:
-        "Potential partnership opportunities for green initiatives and positive PR positioning.",
-      summary: "Leading technology companies have announced ambitious new sustainability programs, signaling a major shift in corporate environmental responsibility.",
-      imageUrl:
-        "https://images.unsplash.com/photo-1466611653911-95081537e5b7?w=400&q=80",
-    },
-    {
-      id: 4,
-      title: "Competitor Analysis: Market Share Shifts in Cloud Computing",
-      source: "Wall Street Journal",
-      date: "2 days ago",
-      sentiment: "neutral",
-      category: "competitors",
-      keyPoints: [
-        "AWS maintains lead but growth rate slowing",
-        "Microsoft Azure gains significant enterprise contracts",
-        "Google Cloud focusing on AI-powered services",
-      ],
-      implications:
-        "Opportunity to differentiate through specialized cloud services and competitive pricing.",
-      summary: "The cloud computing landscape continues to evolve with significant market share movements among major providers, creating new opportunities for strategic positioning.",
-      imageUrl:
-        "https://images.unsplash.com/photo-1521737604893-d14cc237f11d?w=400&q=80",
-    },
-    {
-      id: 5,
-      title: "Market Volatility Reaches Two-Year High Amid Economic Uncertainty",
-      source: "CNBC",
-      date: "3 days ago",
-      sentiment: "negative",
-      category: "market",
-      keyPoints: [
-        "VIX index at highest point since 2022",
-        "Tech stocks particularly affected by selloffs",
-        "Analysts predict continued uncertainty through Q2",
-      ],
-      implications:
-        "Review investment strategy and consider hedging options for corporate treasury.",
-      summary: "Financial markets are experiencing heightened volatility as investors grapple with economic uncertainty and changing monetary policy expectations.",
-      imageUrl:
-        "https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?w=400&q=80",
-    },
-    {
-      id: 6,
-      title: "Remote Work Productivity Study Shows Surprising Results",
-      source: "Harvard Business Review",
-      date: "4 days ago",
-      sentiment: "positive",
-      category: "tech",
-      keyPoints: [
-        "Productivity increased 13% in fully remote teams",
-        "Work satisfaction scores higher for flexible arrangements",
-        "Specific collaboration tools correlated with better outcomes",
-      ],
-      implications:
-        "Consider permanent flexible work policy and investment in recommended collaboration tools.",
-      summary: "A comprehensive study reveals that remote work arrangements continue to deliver productivity benefits, challenging traditional office-centric work models.",
-      imageUrl:
-        "https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?w=400&q=80",
-    },
-  ];
+  const trendingTopics = state.trendingTopics;
+  const sentimentData = state.sentimentData;
 
   // Filter articles based on category, sentiment, and search
-  const filteredArticles = mockArticles.filter((article) => {
+  const filteredArticles = (state.articles ?? []).filter((article) => {
     const matchesCategory = category === "all" || article.category === category;
-    const matchesSentiment = selectedFilter === "all" || article.sentiment === selectedFilter;
-    const matchesSearch = searchQuery === "" || 
+    const matchesSentiment =
+      selectedFilter === "all" || article.sentiment === selectedFilter;
+    const matchesSearch =
+      searchQuery === "" ||
       article.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
       article.summary.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      article.keyPoints.some(point => point.toLowerCase().includes(searchQuery.toLowerCase()));
-    
+      article.keyPoints.some((point) =>
+        point.toLowerCase().includes(searchQuery.toLowerCase()),
+      );
+
     return matchesCategory && matchesSentiment && matchesSearch;
   });
 
-  const handleRefresh = () => {
+  const handleRefresh = async () => {
     setIsLoading(true);
-    // Simulate API call
-    setTimeout(() => {
+    try {
+      await actions.refreshData();
+    } finally {
       setIsLoading(false);
       setLastRefresh(new Date());
-    }, 1500);
+    }
   };
 
-  const handleArticleSave = (articleId: number) => {
-    console.log(`Article ${articleId} saved`);
-    // Here you would typically update the saved articles state or make an API call
+  const handleArticleSave = (articleId: string) => {
+    actions.saveArticle(articleId);
   };
 
-  const handleArticleShare = (articleId: number) => {
-    console.log(`Article ${articleId} shared`);
-    // Here you would typically handle sharing functionality
+  const handleArticleShare = (articleId: string, method: string) => {
+    actions.shareArticle(articleId, method);
   };
 
-  const handleArticleAnnotate = (articleId: number, annotation: string) => {
-    console.log(`Article ${articleId} annotated:`, annotation);
-    // Here you would typically save the annotation to your backend
+  const handleArticleAnnotate = (articleId: string, annotation: string) => {
+    actions.addAnnotation(articleId, annotation);
   };
 
   return (
@@ -276,15 +161,15 @@ const DashboardContent = ({
                 <div className="flex gap-4 mt-4">
                   <div className="flex items-center">
                     <div className="w-3 h-3 rounded-full bg-green-500 mr-2"></div>
-                    <span className="text-sm">Positive (42%)</span>
+                    <span className="text-sm">Positive ({sentimentData?.positive ?? 0}%)</span>
                   </div>
                   <div className="flex items-center">
                     <div className="w-3 h-3 rounded-full bg-gray-400 mr-2"></div>
-                    <span className="text-sm">Neutral (35%)</span>
+                    <span className="text-sm">Neutral ({sentimentData?.neutral ?? 0}%)</span>
                   </div>
                   <div className="flex items-center">
                     <div className="w-3 h-3 rounded-full bg-red-500 mr-2"></div>
-                    <span className="text-sm">Negative (23%)</span>
+                    <span className="text-sm">Negative ({sentimentData?.negative ?? 0}%)</span>
                   </div>
                 </div>
               </CardContent>
@@ -329,6 +214,12 @@ const DashboardContent = ({
           </div>
 
           <h2 className="text-2xl font-bold mt-8">Top Stories</h2>
+          {state.isLoading ? (
+            <div className="flex items-center justify-center py-12 text-muted-foreground">
+              <Loader2 className="h-5 w-5 mr-2 animate-spin" />
+              Loading articles...
+            </div>
+          ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {filteredArticles.slice(0, 3).map((article) => (
               <ArticleDigest
@@ -342,11 +233,12 @@ const DashboardContent = ({
                 summary={article.summary}
                 imageUrl={article.imageUrl}
                 onSave={() => handleArticleSave(article.id)}
-                onShare={() => handleArticleShare(article.id)}
+                onShare={() => handleArticleShare(article.id, 'clipboard')}
                 onAnnotate={(annotation) => handleArticleAnnotate(article.id, annotation)}
               />
             ))}
           </div>
+          )}
         </TabsContent>
 
         <TabsContent value="articles">
@@ -417,7 +309,7 @@ const DashboardContent = ({
                   imageUrl={article.imageUrl}
                   layout={viewMode === "list" ? "horizontal" : "vertical"}
                   onSave={() => handleArticleSave(article.id)}
-                  onShare={() => handleArticleShare(article.id)}
+                  onShare={() => handleArticleShare(article.id, 'clipboard')}
                   onAnnotate={(annotation) => handleArticleAnnotate(article.id, annotation)}
                 />
               ))}

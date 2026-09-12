@@ -2,6 +2,7 @@
 import { Agent, Article } from './newsDataService';
 import { authService } from './authService';
 import { databaseService } from './databaseService';
+import { runIngestionForAgent } from './ingestion/pipeline';
 
 export interface AgentCapabilities {
   webScraping: boolean;
@@ -210,41 +211,41 @@ class AgentService {
     const user = authService.getCurrentUser();
     if (!user) throw new Error('User not authenticated');
 
-    const results: ScrapingResult[] = [];
-    
-    // Check if user has access to all configured sources
-    const sourceLimit = user.subscription.features.maxSources;
-    const allowedSources = sourceLimit === -1 ? agent.sources : agent.sources.slice(0, sourceLimit);
-    
-    // Simulate scraping from each allowed source
-    for (let i = 0; i < allowedSources.length; i++) {
-      const source = allowedSources[i];
-      task.progress = (i / allowedSources.length) * 50; // First 50% for scraping
-      
-      await this.delay(1000); // Simulate scraping time
-      
-      // Mock scraping results with enhanced data for paid users
-      const mockResults = await this.mockScrapeSource(source, agent.topics, agent.entities, user.subscription.features.aiSynthesis);
-      results.push(...mockResults);
+    task.progress = 10;
+
+    // Run the shared ingestion pipeline (RSS first, then NewsAPI, then mock
+    // fallback) so scrape runs produce real persisted content.
+    const result = await runIngestionForAgent(agent, { preferMock: import.meta.env.DEV ? false : undefined });
+    task.progress = 70;
+
+    // Persist the articles (Supabase mode inserts rows; demo mode no-ops).
+    let insertedIds: string[] = [];
+    try {
+      insertedIds = await databaseService.insertArticles(
+        user.id,
+        result.articles,
+        agent.id,
+      );
+    } catch (err) {
+      // Persistence errors should not fail the whole task; report them.
+      task.error = err instanceof Error ? err.message : 'Failed to persist articles';
     }
-    
-    // Simulate content processing (enhanced for paid users)
-    for (let i = 0; i < results.length; i++) {
-      task.progress = 50 + (i / results.length) * 50; // Next 50% for processing
-      await this.delay(500);
-      
-      // Add sentiment analysis and entity extraction (subscription-gated)
-      if (user.subscription.features.aiSynthesis) {
-        results[i].sentiment = this.analyzeSentiment(results[i].content);
-        results[i].entities = this.extractEntities(results[i].content, agent.entities);
-      }
+
+    // Update agent stats when Supabase showed newly inserted rows.
+    if (insertedIds.length > 0) {
+      await databaseService.updateUserAgent(user.id, agent.id, {
+        articlesCollected: agent.articlesCollected + insertedIds.length,
+        status: 'active',
+        lastUpdate: new Date().toLocaleString(),
+      });
     }
-    
+
     task.results = {
-      articlesFound: results.length,
-      sources: allowedSources,
-      articles: results.slice(0, user.subscription.features.aiSynthesis ? 20 : 5), // More results for paid users
-      enhancedAnalysis: user.subscription.features.aiSynthesis,
+      articlesFound: result.articles.length,
+      sourcesScanned: result.sourcesScanned,
+      usedFallback: result.usedFallback,
+      errors: result.errors,
+      articles: result.articles.slice(0, 10),
     };
   }
 

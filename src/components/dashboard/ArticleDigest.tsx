@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   Card,
   CardContent,
@@ -36,6 +36,7 @@ interface ArticleDigestProps {
   imageUrl?: string;
   articleUrl?: string;
   layout?: "vertical" | "horizontal";
+  saved?: boolean;
   onSave?: () => void;
   onShare?: () => void;
   onAnnotate?: (annotation: string) => void;
@@ -57,14 +58,20 @@ const ArticleDigest = ({
   imageUrl = "https://images.unsplash.com/photo-1586528116311-ad8dd3c8310d?w=500&q=80",
   articleUrl = "#",
   layout = "vertical",
+  saved = false,
   onSave,
   onShare,
   onAnnotate,
 }: ArticleDigestProps) => {
-  const [isSaved, setIsSaved] = useState(false);
+  const [isSaved, setIsSaved] = useState(saved);
   const [annotation, setAnnotation] = useState("");
   const [isAnnotationOpen, setIsAnnotationOpen] = useState(false);
   const [isKindleReaderOpen, setIsKindleReaderOpen] = useState(false);
+
+  // Keep the local icon in sync when the parent (context) flips saved state.
+  useEffect(() => {
+    setIsSaved(saved);
+  }, [saved]);
 
   const sentimentColors = {
     positive: "bg-green-100 text-green-800 border-green-200",

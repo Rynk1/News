@@ -1,10 +1,22 @@
 import { Suspense } from "react";
-import { useRoutes, Routes, Route } from "react-router-dom";
+import { useRoutes, Routes, Route, Navigate } from "react-router-dom";
 import Home from "./components/home";
 import routes from "tempo-routes";
 import { NewsProvider } from "./contexts/NewsContext";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import LoginPage from "./components/auth/LoginPage";
+import SavedArticles from "./components/saved/SavedArticles";
+import AnalyticsPage from "./components/analytics/AnalyticsPage";
+import SettingsPage from "./components/settings/SettingsPage";
+import AdminDashboard from "./components/admin/AdminDashboard";
+
+function AdminRoute() {
+  const { user } = useAuth();
+  if (user?.role !== "admin") {
+    return <Navigate to="/" replace />;
+  }
+  return <AdminDashboard />;
+}
 
 function AppRoutes() {
   const { user, loading, usesBackend } = useAuth();
@@ -33,6 +45,11 @@ function AppRoutes() {
       <>
         <Routes>
           <Route path="/" element={<Home />} />
+          <Route path="/saved" element={<SavedArticles />} />
+          <Route path="/analytics" element={<AnalyticsPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/admin" element={<AdminRoute />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
         {tempoRoutes}
       </>

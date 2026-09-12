@@ -1,6 +1,6 @@
 // Mock data service for the news dashboard
 export interface Article {
-  id: number;
+  id: string;
   title: string;
   source: string;
   date: string;
@@ -44,7 +44,7 @@ export interface SentimentData {
 class NewsDataService {
   private articles: Article[] = [
     {
-      id: 1,
+      id: "mock-1",
       title: "AI Regulation Framework Proposed by EU Commission",
       source: "Financial Times",
       date: "2 hours ago",
@@ -63,7 +63,7 @@ class NewsDataService {
       annotations: [],
     },
     {
-      id: 2,
+      id: "mock-2",
       title: "Global Supply Chain Disruptions Expected to Continue Through 2024",
       source: "Bloomberg",
       date: "5 hours ago",
@@ -82,7 +82,7 @@ class NewsDataService {
       annotations: [],
     },
     {
-      id: 3,
+      id: "mock-3",
       title: "Major Tech Companies Announce New Sustainability Initiatives",
       source: "Reuters",
       date: "1 day ago",
@@ -101,7 +101,7 @@ class NewsDataService {
       annotations: [],
     },
     {
-      id: 4,
+      id: "mock-4",
       title: "Competitor Analysis: Market Share Shifts in Cloud Computing",
       source: "Wall Street Journal",
       date: "2 days ago",
@@ -120,7 +120,7 @@ class NewsDataService {
       annotations: [],
     },
     {
-      id: 5,
+      id: "mock-5",
       title: "Market Volatility Reaches Two-Year High Amid Economic Uncertainty",
       source: "CNBC",
       date: "3 days ago",
@@ -139,7 +139,7 @@ class NewsDataService {
       annotations: [],
     },
     {
-      id: 6,
+      id: "mock-6",
       title: "Remote Work Productivity Study Shows Surprising Results",
       source: "Harvard Business Review",
       date: "4 days ago",
@@ -170,6 +170,11 @@ class NewsDataService {
   // Simulate API delay
   private delay(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /** Deep copy of the seed articles (used to bootstrap demo user data). */
+  getBaseArticles(): Article[] {
+    return this.articles.map((a) => ({ ...a, annotations: [...(a.annotations ?? [])] }));
   }
 
   async getArticles(filters?: {
@@ -220,7 +225,7 @@ class NewsDataService {
     };
   }
 
-  async saveArticle(articleId: number): Promise<void> {
+  async saveArticle(articleId: string): Promise<void> {
     await this.delay(200);
     const article = this.articles.find(a => a.id === articleId);
     if (article) {
@@ -228,7 +233,7 @@ class NewsDataService {
     }
   }
 
-  async addAnnotation(articleId: number, annotation: string): Promise<void> {
+  async addAnnotation(articleId: string, annotation: string): Promise<void> {
     await this.delay(300);
     const article = this.articles.find(a => a.id === articleId);
     if (article) {
@@ -239,7 +244,7 @@ class NewsDataService {
     }
   }
 
-  async shareArticle(articleId: number, method: string): Promise<void> {
+  async shareArticle(articleId: string, method: string): Promise<void> {
     await this.delay(200);
     console.log(`Article ${articleId} shared via ${method}`);
   }
